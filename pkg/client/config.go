@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,11 +20,13 @@ import (
 	"github.com/go-json-experiment/json"
 	"github.com/go-json-experiment/json/jsontext"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 
 	"github.com/datawire/dlib/dlog"
 	"github.com/datawire/k8sapi/pkg/k8sapi"
+	"github.com/telepresenceio/telepresence/rpc/v2/daemon"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/filelocation"
 	"github.com/telepresenceio/telepresence/v2/pkg/iputil"
@@ -31,6 +34,9 @@ import (
 
 type DefaultsAware interface {
 	defaults() DefaultsAware
+	IsZero() bool
+	MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error
+	UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error
 }
 
 func jsonName(f reflect.StructField) string {
@@ -66,8 +72,8 @@ func mapWithoutDefaults[T DefaultsAware](sourceStruct T) map[string]any {
 	return m
 }
 
-// mapWithoutDefaults will merge non-default values from sourceStruct into targetStruct
-func mergeNonDefaults[T DefaultsAware](targetStruct, sourceStruct T) {
+// mapWithoutDefaults will merge non-default values from sourceStruct into targetStruct.
+func mergeNonDefaults[T DefaultsAware](targetStruct T, sourceStruct T) {
 	tv := reflect.ValueOf(targetStruct).Elem()
 	sv := reflect.ValueOf(sourceStruct).Elem()
 	dv := reflect.ValueOf(targetStruct.defaults()).Elem()
@@ -101,6 +107,8 @@ type Config interface {
 	TelepresenceAPI() *TelepresenceAPI
 	Intercept() *Intercept
 	Cluster() *Cluster
+	DNS() *DNS
+	Routing() *Routing
 	DestructiveMerge(Config)
 	Merge(priority Config) Config
 }
@@ -115,6 +123,8 @@ type BaseConfig struct {
 	TelepresenceAPIV TelepresenceAPI `json:"telepresenceAPI,omitzero"`
 	InterceptV       Intercept       `json:"intercept,omitzero"`
 	ClusterV         Cluster         `json:"cluster,omitzero"`
+	DNSV             DNS             `json:"dns,omitzero"`
+	RoutingV         Routing         `json:"routing,omitzero"`
 }
 
 func (c *BaseConfig) OSSpecific() *OSSpecificConfig {
@@ -151,6 +161,14 @@ func (c *BaseConfig) Intercept() *Intercept {
 
 func (c *BaseConfig) Cluster() *Cluster {
 	return &c.ClusterV
+}
+
+func (c *BaseConfig) DNS() *DNS {
+	return &c.DNSV
+}
+
+func (c *BaseConfig) Routing() *Routing {
+	return &c.RoutingV
 }
 
 func (c *BaseConfig) MarshalYAML() ([]byte, error) {
@@ -190,24 +208,6 @@ func MarshalJSON(value any) ([]byte, error) {
 }
 
 func UnmarshalJSONConfig(data []byte, rejectUnknown bool) (Config, error) {
-	opts := []json.Options{
-		json.WithUnmarshalers(
-			json.UnmarshalFuncV2(func(dec *jsontext.Decoder, strategy *k8sapi.AppProtocolStrategy, opts json.Options) error {
-				var s string
-				if err := json.UnmarshalDecode(dec, &s, opts); err != nil {
-					panic(err)
-					return err
-				}
-				err := strategy.EnvDecode(s)
-				if err != nil {
-					panic(err)
-				}
-				return err
-			})),
-	}
-	if rejectUnknown {
-		opts = append(opts, json.RejectUnknownMembers(true))
-	}
 	cfg := GetDefaultConfig()
 	if err := UnmarshalJSON(data, cfg, rejectUnknown); err != nil {
 		return nil, err
@@ -249,6 +249,8 @@ func (c *BaseConfig) DestructiveMerge(lc Config) {
 	c.TelepresenceAPIV.merge(lc.TelepresenceAPI())
 	c.InterceptV.merge(lc.Intercept())
 	c.ClusterV.merge(lc.Cluster())
+	c.DNSV.merge(lc.DNS())
+	c.RoutingV.merge(lc.Routing())
 }
 
 func (c *BaseConfig) Merge(lc Config) Config {
@@ -325,7 +327,7 @@ type Timeouts struct {
 	PrivateHelm time.Duration `json:"helm"`
 	// PrivateIntercept is the time to wait for an intercept after the agents has been installed
 	PrivateIntercept time.Duration `json:"intercept"`
-	// PrivateRoundtripLatency is how much to add  to the EndpointDial timeout when establishing a remote connection.
+	// PrivateRoundtripLatency is how much to add to the EndpointDial timeout when establishing a remote connection.
 	PrivateRoundtripLatency time.Duration `json:"roundtripLatency"`
 	// PrivateProxyDial is how long to wait for the proxy to establish an outbound connection
 	PrivateProxyDial time.Duration `json:"proxyDial"`
@@ -523,6 +525,15 @@ func (t *Timeouts) MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error
 	return json.MarshalEncode(out, mapWithoutDefaults(t), opts)
 }
 
+func (t *Timeouts) UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error {
+	// Prevent that the original object is cleared when an empty object is decoded by passing the address
+	// of the pointer to the object. The unmarshal will then instead clear the pointer (wp becomes nil) and
+	// leave the underlying object intact. In other words, this code achieves "omitempty" during unmarshal.
+	type wt Timeouts
+	wp := (*wt)(t)
+	return json.UnmarshalDecode(in, &wp, opts)
+}
+
 const (
 	defaultLogLevelsUserDaemon = logrus.InfoLevel
 	defaultLogLevelsRootDaemon = logrus.InfoLevel
@@ -554,6 +565,15 @@ func (ll *LogLevels) IsZero() bool {
 
 func (ll *LogLevels) MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error {
 	return json.MarshalEncode(out, mapWithoutDefaults(ll), opts)
+}
+
+func (ll *LogLevels) UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error {
+	// Prevent that the original object is cleared when an empty object is decoded by passing the address
+	// of the pointer to the object. The unmarshal will then instead clear the pointer (wp becomes nil) and
+	// leave the underlying object intact. In other words, this code achieves "omitempty" during unmarshal.
+	type wt LogLevels
+	wp := (*wt)(ll)
+	return json.UnmarshalDecode(in, &wp, opts)
 }
 
 type Images struct {
@@ -589,6 +609,15 @@ func (img *Images) MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error
 	return json.MarshalEncode(out, mapWithoutDefaults(img), opts)
 }
 
+func (img *Images) UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error {
+	// Prevent that the original object is cleared when an empty object is decoded by passing the address
+	// of the pointer to the object. The unmarshal will then instead clear the pointer (wp becomes nil) and
+	// leave the underlying object intact. In other words, this code achieves "omitempty" during unmarshal.
+	type wt Images
+	wp := (*wt)(img)
+	return json.UnmarshalDecode(in, &wp, opts)
+}
+
 func (img *Images) Registry(c context.Context) string {
 	if img.PrivateRegistry == defaultImagesRegistry {
 		env := GetEnv(c)
@@ -620,7 +649,7 @@ func (img *Images) ClientImage(c context.Context) string {
 type Grpc struct {
 	// MaxReceiveSize is the maximum message size in bytes the client can receive in a gRPC call or stream message.
 	// Overrides the gRPC default of 4MB.
-	MaxReceiveSizeV resource.Quantity `json:"maxReceiveSize,omitempty"`
+	MaxReceiveSizeV resource.Quantity `json:"maxReceiveSize"`
 }
 
 func (g *Grpc) MaxReceiveSize() int64 {
@@ -644,7 +673,7 @@ func (g *Grpc) IsZero() bool {
 }
 
 type TelepresenceAPI struct {
-	Port int `json:"port,omitempty"`
+	Port int `json:"port"`
 }
 
 func (g *TelepresenceAPI) merge(o *TelepresenceAPI) {
@@ -665,16 +694,17 @@ const (
 )
 
 var defaultIntercept = Intercept{ //nolint:gochecknoglobals // constant
-	DefaultPort: defaultInterceptDefaultPort,
-	Telemount:   defaultTelemount,
+	AppProtocolStrategy: k8sapi.Http2Probe,
+	DefaultPort:         defaultInterceptDefaultPort,
+	Telemount:           defaultTelemount,
 }
 
 type DockerImage struct {
-	RegistryAPI string `json:"registryAPI,omitempty"`
-	Registry    string `json:"registry,omitempty"`
-	Namespace   string `json:"namespace,omitempty"`
-	Repository  string `json:"repository,omitempty"`
-	Tag         string `json:"tag,omitempty"`
+	RegistryAPI string `json:"registryAPI"`
+	Registry    string `json:"registry"`
+	Namespace   string `json:"namespace"`
+	Repository  string `json:"repository"`
+	Tag         string `json:"tag"`
 }
 
 type Intercept struct {
@@ -700,6 +730,15 @@ func (ic *Intercept) IsZero() bool {
 
 func (ic *Intercept) MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error {
 	return json.MarshalEncode(out, mapWithoutDefaults(ic), opts)
+}
+
+func (ic *Intercept) UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error {
+	// Prevent that the original object is cleared when an empty object is decoded by passing the address
+	// of the pointer to the object. The unmarshal will then instead clear the pointer (wp becomes nil) and
+	// leave the underlying object intact. In other words, this code achieves "omitempty" during unmarshal.
+	type wt Intercept
+	wp := (*wt)(ic)
+	return json.UnmarshalDecode(in, &wp, opts)
 }
 
 type Cluster struct {
@@ -730,17 +769,89 @@ func (cc *Cluster) merge(o *Cluster) {
 	mergeNonDefaults(cc, o)
 }
 
+// IsZero controls whether this element will be included in marshalled output.
+func (cc *Cluster) IsZero() bool {
+	return cc == nil || isDefault(cc)
+}
+
 func (cc *Cluster) MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error {
 	return json.MarshalEncode(out, mapWithoutDefaults(cc), opts)
 }
 
+func (cc *Cluster) UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error {
+	// Prevent that the original object is cleared when an empty object is decoded by passing the address
+	// of the pointer to the object. The unmarshal will then instead clear the pointer (wp becomes nil) and
+	// leave the underlying object intact. In other words, this code achieves "omitempty" during unmarshal.
+	type wt Cluster
+	wp := (*wt)(cc)
+	return json.UnmarshalDecode(in, &wp, opts)
+}
+
+func (r *Routing) merge(o *Routing) {
+	if len(o.AlsoProxy) > 0 {
+		r.AlsoProxy = o.AlsoProxy
+	}
+	if len(o.NeverProxy) > 0 {
+		r.NeverProxy = o.NeverProxy
+	}
+	if len(o.AllowConflicting) > 0 {
+		r.AllowConflicting = o.AllowConflicting
+	}
+	if len(o.Subnets) > 0 {
+		r.Subnets = o.Subnets
+	}
+}
+
+func (d *DNS) Equal(o *DNS) bool {
+	if d == nil || o == nil {
+		return d == o
+	}
+	return o.LocalIP == d.LocalIP &&
+		o.RemoteIP == d.RemoteIP &&
+		o.LookupTimeout == d.LookupTimeout &&
+		slices.Equal(o.IncludeSuffixes, d.IncludeSuffixes) &&
+		slices.Equal(o.ExcludeSuffixes, d.ExcludeSuffixes) &&
+		slices.Equal(o.Excludes, d.Excludes) &&
+		slices.Equal(o.Mappings, d.Mappings)
+}
+
+var DefaultExcludeSuffixes = []string{ //nolint:gochecknoglobals // constant
+	".com",
+	".io",
+	".net",
+	".org",
+	".ru",
+}
+
+var defaultDNS = DNS{ //nolint:gochecknoglobals // constant
+	ExcludeSuffixes: DefaultExcludeSuffixes,
+}
+
+func (d *DNS) defaults() DefaultsAware {
+	return &defaultDNS
+}
+
+// merge merges this instance with the non-zero values of the given argument. The argument values take priority.
+func (d *DNS) merge(o *DNS) {
+	mergeNonDefaults(d, o)
+}
+
 // IsZero controls whether this element will be included in marshalled output.
-func (cc *Cluster) IsZero() bool {
-	return cc == nil || cc.DefaultManagerNamespace == defaultDefaultManagerNamespace &&
-		len(cc.MappedNamespaces) == 0 &&
-		cc.ConnectFromRootDaemon &&
-		cc.AgentPortForward &&
-		cc.VirtualIPSubnet == defaultVirtualIPSubnet
+func (d *DNS) IsZero() bool {
+	return d == nil || d.Equal(&defaultDNS)
+}
+
+func (d *DNS) MarshalJSONV2(out *jsontext.Encoder, opts json.Options) error {
+	return json.MarshalEncode(out, mapWithoutDefaults(d), opts)
+}
+
+func (d *DNS) UnmarshalJSONV2(in *jsontext.Decoder, opts json.Options) error {
+	// Prevent that the original object is cleared when an empty object is decoded by passing the address
+	// of the pointer to the object. The unmarshal will then instead clear the pointer (wp becomes nil) and
+	// leave the underlying object intact. In other words, this code achieves "omitempty" during unmarshal.
+	type wt DNS
+	wp := (*wt)(d)
+	return json.UnmarshalDecode(in, &wp, opts)
 }
 
 type configKey struct{}
@@ -794,6 +905,8 @@ var defaultConfig = BaseConfig{ //nolint:gochecknoglobals // constant
 	TelepresenceAPIV: TelepresenceAPI{},
 	InterceptV:       defaultIntercept,
 	ClusterV:         defaultCluster,
+	DNSV:             defaultDNS,
+	RoutingV:         Routing{},
 }
 
 // GetDefaultBaseConfig returns the default configuration settings.
@@ -850,49 +963,142 @@ func LoadConfig(c context.Context) (cfg Config, err error) {
 }
 
 type Routing struct {
-	Subnets          []*iputil.Subnet `json:"subnets,omitempty"`
-	AlsoProxy        []*iputil.Subnet `json:"alsoProxy,omitempty"`
-	NeverProxy       []*iputil.Subnet `json:"neverProxy,omitempty"`
-	AllowConflicting []*iputil.Subnet `json:"allowConflicting,omitempty"`
+	Subnets          []netip.Prefix `json:"subnets"`
+	AlsoProxy        []netip.Prefix `json:"alsoProxy"`
+	NeverProxy       []netip.Prefix `json:"neverProxy"`
+	AllowConflicting []netip.Prefix `json:"allowConflicting"`
+}
+
+func (r *Routing) ToRPC() *daemon.Routing {
+	return &daemon.Routing{
+		Subnets:                 iputil.PrefixesToRPC(r.Subnets),
+		AlsoProxySubnets:        iputil.PrefixesToRPC(r.AlsoProxy),
+		NeverProxySubnets:       iputil.PrefixesToRPC(r.NeverProxy),
+		AllowConflictingSubnets: iputil.PrefixesToRPC(r.AllowConflicting),
+	}
+}
+
+func RoutingFromRPC(r *daemon.Routing) *Routing {
+	return &Routing{
+		Subnets:          iputil.RPCsToPrefixes(r.Subnets),
+		AlsoProxy:        iputil.RPCsToPrefixes(r.AlsoProxySubnets),
+		NeverProxy:       iputil.RPCsToPrefixes(r.NeverProxySubnets),
+		AllowConflicting: iputil.RPCsToPrefixes(r.AllowConflictingSubnets),
+	}
 }
 
 // RoutingSnake is the same as Routing but with snake_case json/yaml names.
 type RoutingSnake struct {
-	Subnets          []*iputil.Subnet `json:"subnets,omitempty"`
-	AlsoProxy        []*iputil.Subnet `json:"also_proxy_subnets,omitempty"`
-	NeverProxy       []*iputil.Subnet `json:"never_proxy_subnets,omitempty"`
-	AllowConflicting []*iputil.Subnet `json:"allow_conflicting_subnets,omitempty"`
+	Subnets          []netip.Prefix `json:"subnets"`
+	AlsoProxy        []netip.Prefix `json:"also_proxy_subnets"`
+	NeverProxy       []netip.Prefix `json:"never_proxy_subnets"`
+	AllowConflicting []netip.Prefix `json:"allow_conflicting_subnets"`
 }
 
 type DNS struct {
-	Error           string        `json:"error,omitempty"`
-	LocalIP         net.IP        `json:"localIP,omitempty"`
-	RemoteIP        net.IP        `json:"remoteIP,omitempty"`
-	IncludeSuffixes []string      `json:"includeSuffixes,omitempty"`
-	ExcludeSuffixes []string      `json:"excludeSuffixes,omitempty"`
-	Excludes        []string      `json:"excludes,omitempty"`
-	Mappings        DNSMappings   `json:"mappings,omitempty"`
-	LookupTimeout   time.Duration `json:"lookupTimeout,omitempty"`
+	Error           string        `json:"error"`
+	LocalIP         netip.Addr    `json:"localIP"`
+	RemoteIP        netip.Addr    `json:"remoteIP"`
+	IncludeSuffixes []string      `json:"includeSuffixes"`
+	ExcludeSuffixes []string      `json:"excludeSuffixes"`
+	Excludes        []string      `json:"excludes"`
+	Mappings        DNSMappings   `json:"mappings"`
+	LookupTimeout   time.Duration `json:"lookupTimeout"`
 }
 
 // DNSSnake is the same as DNS but with snake_case json/yaml names.
 type DNSSnake struct {
-	Error           string        `json:"error,omitempty"`
-	LocalIP         net.IP        `json:"local_ip,omitempty"`
-	RemoteIP        net.IP        `json:"remote_ip,omitempty"`
-	IncludeSuffixes []string      `json:"include_suffixes,omitempty"`
-	ExcludeSuffixes []string      `json:"exclude_suffixes,omitempty"`
-	Excludes        []string      `json:"excludes,omitempty"`
-	Mappings        DNSMappings   `json:"mappings,omitempty"`
-	LookupTimeout   time.Duration `json:"lookup_timeout,omitempty"`
+	Error           string        `json:"error"`
+	LocalIP         netip.Addr    `json:"local_ip"`
+	RemoteIP        netip.Addr    `json:"remote_ip"`
+	IncludeSuffixes []string      `json:"include_suffixes"`
+	ExcludeSuffixes []string      `json:"exclude_suffixes"`
+	Excludes        []string      `json:"excludes"`
+	Mappings        DNSMappings   `json:"mappings"`
+	LookupTimeout   time.Duration `json:"lookup_timeout"`
+}
+
+func (d *DNS) ToRPC() *daemon.DNSConfig {
+	rd := daemon.DNSConfig{
+		LocalIp:         d.LocalIP.AsSlice(),
+		RemoteIp:        d.RemoteIP.AsSlice(),
+		ExcludeSuffixes: d.ExcludeSuffixes,
+		IncludeSuffixes: d.IncludeSuffixes,
+		Excludes:        d.Excludes,
+		LookupTimeout:   durationpb.New(d.LookupTimeout),
+		Error:           d.Error,
+	}
+	if len(d.Mappings) > 0 {
+		rd.Mappings = make([]*daemon.DNSMapping, len(d.Mappings))
+		for i, n := range d.Mappings {
+			rd.Mappings[i] = &daemon.DNSMapping{
+				Name:     n.Name,
+				AliasFor: n.AliasFor,
+			}
+		}
+	}
+	return &rd
+}
+
+func (d *DNS) ToSnake() *DNSSnake {
+	return &DNSSnake{
+		LocalIP:         d.LocalIP,
+		RemoteIP:        d.RemoteIP,
+		ExcludeSuffixes: d.ExcludeSuffixes,
+		IncludeSuffixes: d.IncludeSuffixes,
+		Excludes:        d.Excludes,
+		Mappings:        d.Mappings,
+		LookupTimeout:   d.LookupTimeout,
+		Error:           d.Error,
+	}
+}
+
+func MappingsFromRPC(mappings []*daemon.DNSMapping) DNSMappings {
+	if l := len(mappings); l > 0 {
+		ml := make(DNSMappings, l)
+		for i, m := range mappings {
+			ml[i] = &DNSMapping{
+				Name:     m.Name,
+				AliasFor: m.AliasFor,
+			}
+		}
+		return ml
+	}
+	return nil
+}
+
+func DNSFromRPC(s *daemon.DNSConfig) *DNS {
+	c := DNS{
+		ExcludeSuffixes: s.ExcludeSuffixes,
+		IncludeSuffixes: s.IncludeSuffixes,
+		Excludes:        s.Excludes,
+		Mappings:        MappingsFromRPC(s.Mappings),
+		Error:           s.Error,
+	}
+	if ip, ok := netip.AddrFromSlice(s.LocalIp); ok {
+		c.LocalIP = ip
+	}
+	if ip, ok := netip.AddrFromSlice(s.RemoteIp); ok {
+		c.RemoteIP = ip
+	}
+	if s.LookupTimeout != nil {
+		c.LookupTimeout = s.LookupTimeout.AsDuration()
+	}
+	return &c
+}
+
+func (r *Routing) ToSnake() *RoutingSnake {
+	return &RoutingSnake{
+		Subnets:          r.Subnets,
+		AlsoProxy:        r.AlsoProxy,
+		NeverProxy:       r.NeverProxy,
+		AllowConflicting: r.AllowConflicting,
+	}
 }
 
 type SessionConfig struct {
-	Config           `json:"clientConfig"`
-	ClientFile       string  `json:"clientFile,omitempty"`
-	DNS              DNS     `json:"dns,omitempty"`
-	Routing          Routing `json:"routing,omitempty"`
-	ManagerNamespace string  `json:"managerNamespace,omitempty"`
+	Config     `json:"clientConfig"`
+	ClientFile string `json:"clientFile"`
 }
 
 func (sc *SessionConfig) UnmarshalJSON(data []byte) error {

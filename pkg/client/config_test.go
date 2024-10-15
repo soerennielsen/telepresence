@@ -127,6 +127,38 @@ func Test_ConfigMarshalYAMLDefaults(t *testing.T) {
 	require.Equal(t, "{}\n", string(cfgBytes))
 }
 
+func Test_ConfigUnmarshalYAMLEmpty(t *testing.T) {
+	cfg, err := ParseConfigYAML(dlog.NewTestContext(t, true), "", []byte("{}"))
+	require.NoError(t, err)
+	require.Equal(t, GetDefaultConfig(), cfg)
+}
+
+func Test_ConfigUnmarshalYAMLBooleanTrueDefault(t *testing.T) {
+	cfg, err := ParseConfigYAML(dlog.NewTestContext(t, true), "", []byte(`
+cluster:
+  connectFromRootDaemon: true
+`))
+	require.NoError(t, err)
+	require.Equal(t, GetDefaultConfig(), cfg)
+}
+
+func Test_ConfigUnmarshalYAMLBooleanTrueDefaultFalse(t *testing.T) {
+	cfg, err := ParseConfigYAML(dlog.NewTestContext(t, true), "", []byte(`
+cluster:
+  connectFromRootDaemon: false
+`))
+	require.NoError(t, err)
+	require.NotEqual(t, GetDefaultConfig(), cfg)
+}
+
+func Test_ConfigUnmarshalYAMLEmptyParent(t *testing.T) {
+	cfg, err := ParseConfigYAML(dlog.NewTestContext(t, true), "", []byte(`
+cluster:
+`))
+	require.NoError(t, err)
+	require.Equal(t, GetDefaultConfig(), cfg)
+}
+
 func Test_ConfigMarshalYAMLDefaultsNotEmitted(t *testing.T) {
 	cfg := GetDefaultConfig()
 	lls := cfg.LogLevels()
