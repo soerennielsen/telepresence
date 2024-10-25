@@ -18,7 +18,7 @@ import (
 
 // userdToManagerShortcut overcomes one minor problem, namely that even though a connector.ManagerProxyClient implements a subset
 // of the manager.ManagerClient interface, we cannot pass the real thing as the proxy. In the Go implementation, the interface returned
-// from a stream function is tightly coupled to the owner of that function and therefore have a different name in the proxy, even though
+// from a stream function is tightly coupled to the owner of that function and therefore has a different name in the proxy, even though
 // its methods are exactly the same. That's why the two affected functions are overridden here, seemingly doing nothing at all. They
 // make it possible to pass the manager.ManagerClient as a connector.ManagerProxyClient.
 type userdToManagerShortcut struct {

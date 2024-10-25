@@ -50,12 +50,12 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/daemon"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/k8sclient"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/rootd"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/scout"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/socket"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd/k8s"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/matcher"
 	"github.com/telepresenceio/telepresence/v2/pkg/proc"
@@ -80,9 +80,6 @@ type session struct {
 	// local information
 	installID string // telepresence's install ID
 	clientID  string // "laptop-username@laptop-hostname"
-
-	// Kubernetes Port Forward Dialer
-	pfDialer dnet.PortForwardDialer
 
 	// manager client
 	managerClient manager.ManagerClient
@@ -188,6 +185,7 @@ func NewSession(
 		return ctx, nil, connectError(rpc.ConnectInfo_CLUSTER_FAILED, err)
 	}
 	dlog.Infof(ctx, "Connected to context %s, namespace %s (%s)", cluster.Context, cluster.Namespace, cluster.Server)
+	ctx = portforward.WithRestConfig(ctx, cluster.Kubeconfig.RestConfig)
 
 	ctx = cluster.WithJoinedClientSetInterface(ctx)
 	scout.SetMetadatum(ctx, "cluster_id", cluster.GetClusterId(ctx))
@@ -237,7 +235,6 @@ func NewSession(
 	if err = tmgr.ApplyConfig(ctx); err != nil {
 		dlog.Warn(ctx, err.Error())
 	}
-	ctx = dnet.WithPortForwardDialer(ctx, tmgr.pfDialer)
 
 	oi := tmgr.getNetworkInfo(ctx, cr)
 	if !userd.GetService(ctx).RootSessionInProcess() {
@@ -376,12 +373,7 @@ func connectMgr(
 		return nil, err
 	}
 
-	dlog.Debug(ctx, "creating port-forward")
-	pfDialer, err := dnet.NewK8sPortForwardDialer(ctx, cluster.Kubeconfig.RestConfig, k8sapi.GetK8sInterface(ctx))
-	if err != nil {
-		return nil, err
-	}
-	conn, mClient, vi, err := k8sclient.ConnectToManager(ctx, mgrNs, pfDialer.Dial)
+	conn, mClient, vi, err := k8sclient.ConnectToManager(ctx, mgrNs)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +470,6 @@ func connectMgr(
 		clientID:           clientID,
 		managerClient:      mClient,
 		managerConn:        conn,
-		pfDialer:           pfDialer,
 		managerName:        managerName,
 		managerVersion:     managerVersion,
 		sessionInfo:        si,
@@ -567,7 +558,6 @@ func (s *session) updateDaemonNamespaces(c context.Context) {
 
 func (s *session) Epilog(ctx context.Context) {
 	_, _ = s.rootDaemon.Disconnect(ctx, &empty.Empty{})
-	_ = s.pfDialer.Close()
 	dlog.Info(ctx, "-- Session ended")
 	close(s.done)
 }

@@ -745,6 +745,7 @@ type Cluster struct {
 	DefaultManagerNamespace string   `json:"defaultManagerNamespace"`
 	MappedNamespaces        []string `json:"mappedNamespaces"`
 	ConnectFromRootDaemon   bool     `json:"connectFromRootDaemon"`
+	ForceSPDY               bool     `json:"forceSPDY"`
 	AgentPortForward        bool     `json:"agentPortForward"`
 	VirtualIPSubnet         string   `json:"virtualIPSubnet"`
 }

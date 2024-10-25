@@ -6,7 +6,7 @@
 <div style="margin-left: 15px">
 
 -> In certain scenarios, the container owning the intercepted port differs from the container the intercept targets. This port owner's sole purpose is to route traffic from the service to the intended container, often using a direct localhost connection.
-This commit introduces a `--container <name>` option to the intercept command. While this option doesn't influence the port selection, it guarantees that the environment variables and mounts propagated to the client originate from the specified container. Additionally, if the `--replace` option is used, it ensures that this container is replaced.
+This update introduces a `--container <name>` option to the intercept command. While this option doesn't influence the port selection, it guarantees that the environment variables and mounts propagated to the client originate from the specified container. Additionally, if the `--replace` option is used, it ensures that this container is replaced.
 </div>
 
 ## <div style="display:flex;"><img src="images/feature.png" alt="feature" style="width:30px;height:fit-content;"/><div style="display:flex;margin-left:7px;">[Unify client configuration](https://telepresence.io/docs/reference/config)</div></div>
@@ -15,6 +15,13 @@ This commit introduces a `--container <name>` option to the intercept command. W
 Previously, client configuration was divided between the config.yml file and a Kubernetes extension. DNS and routing settings were initially found only in the extension. However, the Helm client structure allowed entries from both.
 To simplify this, we've now aligned the config.yml and Kubernetes extension with the Helm client structure. This means DNS and routing settings are now included in both. The Kubernetes extension takes precedence over the config.yml and Helm client object.
 While the old-style Kubernetes extension is still supported for compatibility, it cannot be used with the new style.
+</div>
+
+## <div style="display:flex;"><img src="images/feature.png" alt="feature" style="width:30px;height:fit-content;"/><div style="display:flex;margin-left:7px;">Use WebSockets for port-forward instead of the now deprecated SPDY.</div></div>
+<div style="margin-left: 15px">
+
+Telepresence will now use WebSockets instead of SPDY when creating port-forwards to the Kubernetes Cluster, and will fall back to SPDY when connecting to clusters that don't support SPDY. Use of the deprecated SPDY can be forced by setting `cluster.forceSPDY=true` in the `config.yml`.
+See [Streaming Transitions from SPDY to WebSockets](https://kubernetes.io/blog/2024/08/20/websockets-transition/) for more information about this transition.
 </div>
 
 ## <div style="display:flex;"><img src="images/feature.png" alt="feature" style="width:30px;height:fit-content;"/><div style="display:flex;margin-left:7px;">Make usage data collection configurable using an extension point, and default to no-ops</div></div>

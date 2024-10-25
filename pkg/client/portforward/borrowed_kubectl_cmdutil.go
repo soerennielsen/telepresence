@@ -17,7 +17,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package dnet // MODIFIED
+package portforward // MODIFIED
 
 import (
 	"k8s.io/apimachinery/pkg/runtime/schema"

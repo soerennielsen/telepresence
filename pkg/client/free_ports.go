@@ -1,4 +1,4 @@
-package dnet
+package client
 
 import "net"
 

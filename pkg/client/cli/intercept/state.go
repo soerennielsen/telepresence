@@ -30,7 +30,6 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/spinner"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/docker"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/scout"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/dos"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/ioutil"
@@ -117,7 +116,7 @@ func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRe
 		if ud.Containerized() && ir.LocalMountPort == 0 {
 			// No use having the remote container actually mount, so let's have it create a bridge
 			// to the remote sftp server instead.
-			lma, err := dnet.FreePortsTCP(1)
+			lma, err := client.FreePortsTCP(1)
 			if err != nil {
 				return nil, err
 			}

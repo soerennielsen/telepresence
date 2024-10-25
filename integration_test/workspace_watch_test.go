@@ -17,7 +17,7 @@ import (
 	"github.com/datawire/k8sapi/pkg/k8sapi"
 	"github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/integration_test/itest"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 )
 
 func (s *notConnectedSuite) Test_WorkspaceListener() {
@@ -200,13 +200,10 @@ func dialTrafficManager(ctx context.Context, cfg *rest.Config, managerNamespace 
 	}
 
 	ctx = k8sapi.WithJoinedClientSetInterface(ctx, k8sApi, argoRollouApi)
-	dialer, err := dnet.NewK8sPortForwardDialer(ctx, cfg, k8sApi)
-	if err != nil {
-		return nil, err
-	}
-	return grpc.NewClient(fmt.Sprintf(dnet.K8sPFScheme+":///svc/traffic-manager.%s:8081", managerNamespace),
-		grpc.WithResolvers(dnet.NewResolver(ctx)),
-		grpc.WithContextDialer(dialer.Dial),
+	ctx = portforward.WithRestConfig(ctx, cfg)
+	return grpc.NewClient(fmt.Sprintf(portforward.K8sPFScheme+":///svc/traffic-manager.%s:8081", managerNamespace),
+		grpc.WithResolvers(portforward.NewResolver(ctx)),
+		grpc.WithContextDialer(portforward.Dialer(ctx)),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 }

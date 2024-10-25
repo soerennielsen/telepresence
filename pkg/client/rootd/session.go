@@ -44,11 +44,11 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/agentpf"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/k8sclient"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/rootd/dns"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/rootd/vip"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/scout"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/socket"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/dnsproxy"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/iputil"
@@ -242,6 +242,7 @@ func connectToManager(
 	if err != nil {
 		return ctx, nil, nil, mgrVer, err
 	}
+	ctx = portforward.WithRestConfig(ctx, rc)
 
 	cs, err := kubernetes.NewForConfig(rc)
 	if err != nil {
@@ -255,6 +256,7 @@ func connectToManager(
 
 	clientConfig := client.GetConfig(ctx)
 	if !clientConfig.Cluster().ConnectFromRootDaemon {
+		dlog.Debug(ctx, "ConnectFromRootDaemon is disabled")
 		conn, mp, v, err := connectToUserDaemon(ctx)
 		return ctx, conn, mp, v, err
 	}
@@ -262,12 +264,8 @@ func connectToManager(
 	tos := clientConfig.Timeouts()
 	tc, cancel := tos.TimeoutContext(ctx, client.TimeoutTrafficManagerConnect)
 	defer cancel()
-	pfDialer, err := dnet.NewK8sPortForwardDialer(tc, rc, cs)
-	if err != nil {
-		return ctx, nil, nil, mgrVer, err
-	}
 
-	conn, mc, ver, err := k8sclient.ConnectToManager(tc, namespace, pfDialer.Dial)
+	conn, mc, ver, err := k8sclient.ConnectToManager(tc, namespace)
 	if err != nil {
 		return ctx, nil, nil, mgrVer, err
 	}
@@ -279,7 +277,7 @@ func connectToManager(
 		conn.Close()
 		return ctx, nil, nil, mgrVer, fmt.Errorf("failed to parse manager version %q: %w", verStr, err)
 	}
-	return dnet.WithPortForwardDialer(ctx, pfDialer), conn, &userdToManagerShortcut{mc}, mgrVer, nil
+	return ctx, conn, &userdToManagerShortcut{mc}, mgrVer, nil
 }
 
 // connectToUserDaemon is like connectToManager but the port-forward will be established from the user-daemon

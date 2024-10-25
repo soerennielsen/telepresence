@@ -26,9 +26,9 @@ import (
 	"github.com/telepresenceio/telepresence/rpc/v2/common"
 	"github.com/telepresenceio/telepresence/rpc/v2/connector"
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/socket"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd/k8s"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 )
 
@@ -126,15 +126,15 @@ func (c *traceCollector) rootdTraces(ctx context.Context, tCh chan<- []byte) err
 	return c.tracesFor(ctx, dConn, tCh, "root-daemon")
 }
 
-func (c *traceCollector) trafficManagerTraces(ctx context.Context, sess *session, tCh chan<- []byte, remotePort string) error {
+func (c *traceCollector) trafficManagerTraces(ctx context.Context, tCh chan<- []byte, remotePort string) error {
 	span := trace.SpanFromContext(ctx)
 	host := "svc/traffic-manager." + k8s.GetManagerNamespace(ctx)
-	grpcAddr := dnet.K8sPFScheme + ":///" + net.JoinHostPort(host, remotePort)
+	grpcAddr := portforward.K8sPFScheme + ":///" + net.JoinHostPort(host, remotePort)
 	span.SetAttributes(attribute.String("traffic-manager.host", host), attribute.String("traffic-manager.port", remotePort))
 
 	opts := []grpc.DialOption{
-		grpc.WithContextDialer(sess.pfDialer.Dial),
-		grpc.WithResolvers(dnet.NewResolver(ctx)),
+		grpc.WithContextDialer(portforward.Dialer(ctx)),
+		grpc.WithResolvers(portforward.NewResolver(ctx)),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	}
@@ -155,7 +155,7 @@ func (c *traceCollector) agentTraces(ctx context.Context, sess *session, tCh cha
 		defer tCancel()
 
 		opts := []grpc.DialOption{
-			grpc.WithContextDialer(sess.pfDialer.Dial),
+			grpc.WithContextDialer(portforward.Dialer(ctx)),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		}
@@ -213,7 +213,7 @@ func (c *traceCollector) gatherTraces(ctx context.Context, sess *session) error 
 
 	go func() {
 		defer wg.Done()
-		err = c.trafficManagerTraces(ctx, sess, tCh, port)
+		err = c.trafficManagerTraces(ctx, tCh, port)
 		if err != nil {
 			err := fmt.Errorf("failed to collect traffic-manager traces: %v", err)
 			span.RecordError(err)

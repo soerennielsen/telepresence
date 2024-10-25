@@ -22,7 +22,6 @@ import (
 	"github.com/telepresenceio/telepresence/rpc/v2/agent"
 	"github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/k8sclient"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/tunnel"
 )
 
@@ -77,16 +76,10 @@ func (ac *client) Tunnel(ctx context.Context, opts ...grpc.CallOption) (tunnel.C
 
 func (ac *client) connect(ctx context.Context, deleteMe func()) {
 	defer close(ac.ready)
-	pfDialer := dnet.GetPortForwardDialer(ctx)
-	if pfDialer == nil {
-		ac.ready <- errors.New("no port-forward dialer configured for context")
-		return
-	}
-
 	dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer dialCancel()
 
-	conn, cli, _, err := k8sclient.ConnectToAgent(dialCtx, pfDialer.Dial, ac.info.PodName, ac.info.Namespace, uint16(ac.info.ApiPort))
+	conn, cli, _, err := k8sclient.ConnectToAgent(dialCtx, ac.info.PodName, ac.info.Namespace, uint16(ac.info.ApiPort))
 	if err != nil {
 		deleteMe()
 		ac.ready <- err
