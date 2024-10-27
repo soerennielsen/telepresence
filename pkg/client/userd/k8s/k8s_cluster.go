@@ -222,12 +222,12 @@ func ConnectCluster(c context.Context, cr *rpc.ConnectRequest, config *client.Ku
 		return c, nil, fmt.Errorf("failed to parse extra allow conflicting subnets: %w", err)
 	}
 	if len(extraAlsoProxy)+len(extraNeverProxy)+len(extraAllow) > 0 {
-		cfg := client.GetDefaultConfig()
+		cfg := client.GetConfig(c).Merge(client.GetDefaultConfig())
 		rt := cfg.Routing()
 		rt.AllowConflicting = append(rt.AllowConflicting, extraAllow...)
 		rt.AlsoProxy = append(rt.AlsoProxy, extraAlsoProxy...)
 		rt.NeverProxy = append(rt.NeverProxy, extraNeverProxy...)
-		c = client.WithConfig(c, client.GetConfig(c).Merge(cfg))
+		c = client.WithConfig(c, cfg)
 	}
 
 	return c, cluster, nil

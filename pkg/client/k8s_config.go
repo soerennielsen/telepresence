@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/csv"
+	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 
@@ -461,6 +463,23 @@ func NewClientConfig(ctx context.Context, configFlags *genericclioptions.ConfigF
 	}), nil
 }
 
+func GetCluster(config api.Config, ctxName string) (*api.Cluster, error) {
+	if len(config.Contexts) == 0 {
+		return nil, errcat.Config.New("kubeconfig has no context definition")
+	}
+	if ctxName == "" {
+		ctxName = config.CurrentContext
+	}
+	kubeCtx, ok := config.Contexts[ctxName]
+	if !ok {
+		return nil, errcat.Config.Newf("context %q does not exist in the kubeconfig", ctxName)
+	}
+	if cluster, ok := config.Clusters[kubeCtx.Cluster]; ok {
+		return cluster, nil
+	}
+	return nil, errcat.Config.Newf("the cluster %q declared in context %q does exists in the kubeconfig", kubeCtx.Cluster, ctxName)
+}
+
 func newKubeconfig(
 	ctx context.Context,
 	originalFlags,
@@ -478,28 +497,15 @@ func newKubeconfig(
 	if err != nil {
 		return ctx, nil, err
 	}
-	if len(config.Contexts) == 0 {
-		return ctx, nil, errcat.Config.New("kubeconfig has no context definition")
-	}
-
-	namespace, _, err := clientConfig.Namespace()
-	if err != nil {
-		return ctx, nil, err
-	}
 
 	ctxName := effectiveFlags["context"]
 	if ctxName == "" {
 		ctxName = config.CurrentContext
 	}
 
-	kubeCtx, ok := config.Contexts[ctxName]
-	if !ok {
-		return ctx, nil, errcat.Config.Newf("context %q does not exist in the kubeconfig", ctxName)
-	}
-
-	cluster, ok := config.Clusters[kubeCtx.Cluster]
-	if !ok {
-		return ctx, nil, errcat.Config.Newf("the cluster %q declared in context %q does exists in the kubeconfig", kubeCtx.Cluster, ctxName)
+	cluster, err := GetCluster(config, ctxName)
+	if err != nil {
+		return ctx, nil, err
 	}
 
 	restConfig, err := clientConfig.ClientConfig()
@@ -507,9 +513,21 @@ func newKubeconfig(
 		return ctx, nil, err
 	}
 
+	namespace, _, err := clientConfig.Namespace()
+	if err != nil {
+		return ctx, nil, err
+	}
 	dlog.Debugf(ctx, "using namespace %q", namespace)
 
-	k := &Kubeconfig{
+	managerNamespace := managerNamespaceOverride
+	if managerNamespace == "" {
+		managerNamespace = GetEnv(ctx).ManagerNamespace
+	}
+	ctx, err = WithKubeExtension(ctx, cluster, managerNamespace)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return ctx, &Kubeconfig{
 		Context:          ctxName,
 		Server:           cluster.Server,
 		Namespace:        namespace,
@@ -517,24 +535,24 @@ func newKubeconfig(
 		OriginalFlagMap:  originalFlags,
 		ClientConfig:     clientConfig,
 		RestConfig:       restConfig,
-	}
+	}, nil
+}
 
+func WithKubeExtension(ctx context.Context, cluster *api.Cluster, managerNamespace string) (context.Context, error) {
 	cfg := GetConfig(ctx)
-	managerNamespace := managerNamespaceOverride
-	if managerNamespace == "" {
-		managerNamespace = GetEnv(ctx).ManagerNamespace
-	}
-
 	var keCfg Config
 	if ext, ok := cluster.Extensions[configExtension].(*runtime.Unknown); ok {
 		if kc, err := UnmarshalJSONConfig(ext.Raw, true); err != nil {
 			// Try with legacy kubeconfigExtension
+			dlog.Debug(ctx, "unable to unmarshal extension as client config, trying legacy format")
 			ke := kubeconfigExtension{}
 			if keErr := json.Unmarshal(ext.Raw, &ke); keErr != nil {
-				return ctx, nil, errcat.Config.Newf("unable to parse extension %s in kubeconfig: %w", configExtension, err)
+				return ctx, errcat.Config.Newf("unable to parse extension %s in kubeconfig: %w", configExtension, err)
 			}
+			dlog.Debug(ctx, "legacy format was successfully parsed")
 			keCfg = ke.asConfig()
 		} else {
+			dlog.Debug(ctx, "successfully parsed extension as client config")
 			keCfg = kc
 		}
 		if managerNamespace != "" {
@@ -545,10 +563,60 @@ func newKubeconfig(
 		keCfg = GetDefaultConfig()
 		keCfg.Cluster().DefaultManagerNamespace = managerNamespace
 	}
-	if keCfg != nil {
-		ctx = WithConfig(ctx, cfg.Merge(keCfg))
+	snps := getServerNeverProxy(ctx, cluster)
+	if len(snps) > 0 {
+		if keCfg == nil {
+			keCfg = GetDefaultConfig()
+		}
+		kr := keCfg.Routing()
+		kr.NeverProxy = append(kr.NeverProxy, snps...)
 	}
-	return ctx, k, nil
+	if keCfg != nil {
+		keCfg = cfg.Merge(keCfg)
+		kr := keCfg.Routing()
+		kr.NeverProxy = append(kr.NeverProxy, cfg.Routing().NeverProxy...)
+		cfg = keCfg
+		ctx = WithConfig(ctx, cfg)
+	}
+	return ctx, nil
+}
+
+func getServerNeverProxy(ctx context.Context, cluster *api.Cluster) []netip.Prefix {
+	server := cluster.Server
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		// This really shouldn't happen as we are connected to the server
+		dlog.Errorf(ctx, "Unable to parse url for k8s server %s: %v", server, err)
+		return nil
+	}
+	hostname := serverURL.Hostname()
+	rawIP, err := netip.ParseAddr(hostname)
+	var ips []netip.Addr
+	if err != nil {
+		dlog.Debugf(ctx, "Hostname for k8s server %s is not an IP address", server)
+		li, err := net.LookupIP(hostname)
+		if err != nil {
+			dlog.Errorf(ctx, "Unable to do DNS lookup for k8s server %s: %v", hostname, err)
+		} else {
+			ips = make([]netip.Addr, len(li))
+			for i, ip := range li {
+				ips[i], _ = netip.AddrFromSlice(ip)
+			}
+		}
+	} else {
+		ips = []netip.Addr{rawIP}
+	}
+	neverProxy := make([]netip.Prefix, 0, len(ips))
+	for _, ip := range ips {
+		if !ip.IsLoopback() {
+			bits := 32
+			if ip.Is6() {
+				bits = 128
+			}
+			neverProxy = append(neverProxy, netip.PrefixFrom(ip, bits))
+		}
+	}
+	return neverProxy
 }
 
 // NewInClusterConfig represents an inClusterConfig.

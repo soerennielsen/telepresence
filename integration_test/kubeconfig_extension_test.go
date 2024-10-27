@@ -121,23 +121,21 @@ func (s *notConnectedSuite) Test_NeverProxy() {
 	if s.IsIPv6() {
 		mask = 128
 	}
-	var ips []netip.Addr
+	neverProxiedCount := 1
 	ctx = itest.WithKubeConfigExtension(ctx, func(cluster *api.Cluster) map[string]any {
-		var err error
-		ips, err = getClusterIPs(cluster)
+		ips, err := getClusterIPs(cluster)
 		require.NoError(err)
+		for _, cip := range ips {
+			if !cip.IsLoopback() {
+				dlog.Infof(ctx, "expect never-proxy of %s", cip)
+				neverProxiedCount++
+			}
+		}
 		return map[string]any{"never-proxy": []string{fmt.Sprintf("%s/%d", ip, mask)}}
 	})
 	s.TelepresenceConnect(ctx, "--context", "extra")
 
-	neverProxiedCount := 1
-
 	// The cluster's IP address will be never proxied unless it's a loopback, so we gotta account for that.
-	for _, cip := range ips {
-		if !cip.IsLoopback() {
-			neverProxiedCount++
-		}
-	}
 	s.Eventually(func() bool {
 		stdout, _, err := itest.Telepresence(ctx, "status")
 		if err != nil {

@@ -964,10 +964,10 @@ func LoadConfig(c context.Context) (cfg Config, err error) {
 }
 
 type Routing struct {
-	Subnets          []netip.Prefix `json:"subnets"`
-	AlsoProxy        []netip.Prefix `json:"alsoProxy"`
-	NeverProxy       []netip.Prefix `json:"neverProxy"`
-	AllowConflicting []netip.Prefix `json:"allowConflicting"`
+	Subnets          []netip.Prefix `json:"subnets,omitempty"`
+	AlsoProxy        []netip.Prefix `json:"alsoProxy,omitempty"`
+	NeverProxy       []netip.Prefix `json:"neverProxy,omitempty"`
+	AllowConflicting []netip.Prefix `json:"allowConflicting,omitempty"`
 }
 
 func (r *Routing) ToRPC() *daemon.Routing {

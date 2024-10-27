@@ -6,10 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"os"
 	"os/user"
 	"slices"
@@ -30,6 +27,7 @@ import (
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/homedir"
+	"sigs.k8s.io/yaml"
 
 	"github.com/datawire/dlib/dcontext"
 	"github.com/datawire/dlib/derror"
@@ -212,13 +210,6 @@ func NewSession(
 		}
 		tmCfg = client.GetDefaultConfig()
 	} else {
-		if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
-			dlog.Debug(ctx, "Applying client configuration from cluster")
-			sc := bufio.NewScanner(bytes.NewReader(cliCfg.ConfigYaml))
-			for sc.Scan() {
-				dlog.Debug(ctx, sc.Text())
-			}
-		}
 		tmCfg, err = client.ParseConfigYAML(ctx, "client configuration from cluster", cliCfg.ConfigYaml)
 		if err != nil {
 			dlog.Warn(ctx, err.Error())
@@ -228,12 +219,22 @@ func NewSession(
 	// Merge traffic-manager's reported config, but get priority to the local config.
 	cfg := client.GetConfig(ctx)
 	if tmCfg != nil {
-		rt := tmCfg.Routing()
-		rt.NeverProxy = append(rt.NeverProxy, tmgr.appendServerNeverProxy(ctx, cfg.Routing().NeverProxy)...)
-		ctx = client.WithConfig(ctx, tmCfg.Merge(cfg))
+		cfg = tmCfg.Merge(cfg)
+		rt := cfg.Routing()
+		rt.NeverProxy = append(rt.NeverProxy, tmCfg.Routing().NeverProxy...)
+		ctx = client.WithConfig(ctx, cfg)
 	}
 	if err = tmgr.ApplyConfig(ctx); err != nil {
 		dlog.Warn(ctx, err.Error())
+	}
+	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
+		dlog.Debug(ctx, "Applying client configuration")
+		buf, _ := client.MarshalJSON(cfg)
+		buf, _ = yaml.JSONToYAML(buf)
+		sc := bufio.NewScanner(bytes.NewReader(buf))
+		for sc.Scan() {
+			dlog.Debug(ctx, sc.Text())
+		}
 	}
 
 	oi := tmgr.getNetworkInfo(ctx, cr)
@@ -244,7 +245,7 @@ func NewSession(
 			return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, err)
 		}
 		if !rootRunning {
-			return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, errors.New("rot daemon is not running"))
+			return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, errors.New("root daemon is not running"))
 		}
 
 		if client.GetConfig(ctx).Cluster().ConnectFromRootDaemon {
@@ -275,42 +276,6 @@ func NewSession(
 
 	tmgr.AddNamespaceListener(ctx, tmgr.updateDaemonNamespaces)
 	return ctx, tmgr, tmgr.status(ctx, true)
-}
-
-func (s *session) appendServerNeverProxy(ctx context.Context, neverProxy []netip.Prefix) []netip.Prefix {
-	serverURL, err := url.Parse(s.Server)
-	if err != nil {
-		// This really shouldn't happen as we are connected to the server
-		dlog.Errorf(ctx, "Unable to parse url for k8s server %s: %v", s.Server, err)
-		return nil
-	}
-	hostname := serverURL.Hostname()
-	rawIP, err := netip.ParseAddr(hostname)
-	var ips []netip.Addr
-	if err != nil {
-		dlog.Debugf(ctx, "Hostname for k8s server %s is not an IP address", s.Server)
-		li, err := net.LookupIP(hostname)
-		if err != nil {
-			dlog.Errorf(ctx, "Unable to do DNS lookup for k8s server %s: %v", hostname, err)
-		} else {
-			ips = make([]netip.Addr, len(li))
-			for i, ip := range li {
-				ips[i], _ = netip.AddrFromSlice(ip)
-			}
-		}
-	} else {
-		ips = []netip.Addr{rawIP}
-	}
-	for _, ip := range ips {
-		if !ip.IsLoopback() {
-			bits := 32
-			if ip.Is6() {
-				bits = 128
-			}
-			neverProxy = append(neverProxy, netip.PrefixFrom(ip, bits))
-		}
-	}
-	return neverProxy
 }
 
 // SetSelf is for internal use by extensions.
