@@ -32,7 +32,6 @@ func init() {
 }
 
 func (s *multipleServicesSuite) Test_LargeRequest() {
-	client := &http.Client{Timeout: 15 * time.Minute}
 	const sendSize = 1024 * 1024 * 20
 	const varyMax = 1 << 15 // vary last 64Ki
 	const concurrentRequests = 13
@@ -60,6 +59,7 @@ func (s *multipleServicesSuite) Test_LargeRequest() {
 				return
 			}
 
+			client := &http.Client{Timeout: 30 * time.Second}
 			resp, err := client.Do(req)
 			if !s.NoError(err) {
 				return
