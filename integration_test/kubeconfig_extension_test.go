@@ -144,7 +144,15 @@ func (s *notConnectedSuite) Test_NeverProxy() {
 			return false
 		}
 		m := regexp.MustCompile(`Never Proxy\s*:\s*\((\d+) subnets\)`).FindStringSubmatch(stdout)
-		return m != nil && m[1] == strconv.Itoa(neverProxiedCount)
+		if m == nil {
+			dlog.Infof(ctx, "did not find any never-proxied subnets\nOut: %s", stdout)
+			return false
+		}
+		if m[1] != strconv.Itoa(neverProxiedCount) {
+			dlog.Infof(ctx, "did not find %d never-proxied subnets\nOut: %s", neverProxiedCount, stdout)
+			return false
+		}
+		return true
 	}, 5*time.Second, 1*time.Second, fmt.Sprintf("did not find %d never-proxied subnets", neverProxiedCount))
 
 	s.Eventually(func() bool {
