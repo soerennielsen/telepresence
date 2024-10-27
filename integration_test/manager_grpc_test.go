@@ -6,13 +6,12 @@ import (
 	"google.golang.org/grpc"
 	empty "google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/datawire/k8sapi/pkg/k8sapi"
 	"github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/integration_test/itest"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/daemon"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/k8sclient"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd/trafficmgr"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 )
 
 type managerGRPCSuite struct {
@@ -40,9 +39,9 @@ func (m *managerGRPCSuite) SetupSuite() {
 	ctx, k8sCluster, err := m.GetK8SCluster(ctx, "", m.ManagerNamespace())
 	m.Require().NoError(err)
 
-	pfDialer, err := dnet.NewK8sPortForwardDialer(ctx, k8sCluster.RestConfig, k8sapi.GetK8sInterface(ctx))
+	ctx = portforward.WithRestConfig(ctx, k8sCluster.RestConfig)
 	m.Require().NoError(err)
-	m.conn, m.client, _, err = k8sclient.ConnectToManager(ctx, m.ManagerNamespace(), pfDialer.Dial)
+	m.conn, m.client, _, err = k8sclient.ConnectToManager(ctx, m.ManagerNamespace())
 	m.Require().NoError(err)
 
 	_, err = m.client.Version(ctx, &empty.Empty{})

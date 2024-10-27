@@ -16,12 +16,12 @@ import (
 	"github.com/telepresenceio/telepresence/rpc/v2/agent"
 	"github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 )
 
-func ConnectToManager(ctx context.Context, namespace string, grpcDialer dnet.DialerFunc) (*grpc.ClientConn, manager.ManagerClient, *manager.VersionInfo2, error) {
+func ConnectToManager(ctx context.Context, namespace string) (*grpc.ClientConn, manager.ManagerClient, *manager.VersionInfo2, error) {
 	grpcAddr := net.JoinHostPort("svc/traffic-manager."+namespace, "api")
-	conn, err := dialClusterGRPC(ctx, grpcAddr, grpcDialer)
+	conn, err := dialClusterGRPC(ctx, grpcAddr)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -40,12 +40,11 @@ type versionAPI interface {
 
 func ConnectToAgent(
 	ctx context.Context,
-	grpcDialer dnet.DialerFunc,
 	podName, namespace string,
 	port uint16,
 ) (*grpc.ClientConn, agent.AgentClient, *manager.VersionInfo2, error) {
 	grpcAddr := fmt.Sprintf("pod/%s.%s:%d", podName, namespace, port)
-	conn, err := dialClusterGRPC(ctx, grpcAddr, grpcDialer)
+	conn, err := dialClusterGRPC(ctx, grpcAddr)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -58,9 +57,9 @@ func ConnectToAgent(
 	return conn, mClient, vi, err
 }
 
-func dialClusterGRPC(ctx context.Context, address string, grpcDialer dnet.DialerFunc) (*grpc.ClientConn, error) {
-	return grpc.NewClient(dnet.K8sPFScheme+":///"+address, grpc.WithContextDialer(grpcDialer),
-		grpc.WithResolvers(dnet.NewResolver(ctx)),
+func dialClusterGRPC(ctx context.Context, address string) (*grpc.ClientConn, error) {
+	return grpc.NewClient(portforward.K8sPFScheme+":///"+address, grpc.WithContextDialer(portforward.Dialer(ctx)),
+		grpc.WithResolvers(portforward.NewResolver(ctx)),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 }

@@ -4,12 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/user"
 	"slices"
@@ -19,18 +16,18 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
+	"github.com/go-json-experiment/json"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/durationpb"
 	empty "google.golang.org/protobuf/types/known/emptypb"
-	"gopkg.in/yaml.v3"
 	core "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/homedir"
+	"sigs.k8s.io/yaml"
 
 	"github.com/datawire/dlib/dcontext"
 	"github.com/datawire/dlib/derror"
@@ -51,14 +48,13 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/daemon"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/k8sclient"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/portforward"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/rootd"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/scout"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/socket"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd/k8s"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
-	"github.com/telepresenceio/telepresence/v2/pkg/iputil"
 	"github.com/telepresenceio/telepresence/v2/pkg/matcher"
 	"github.com/telepresenceio/telepresence/v2/pkg/proc"
 	"github.com/telepresenceio/telepresence/v2/pkg/restapi"
@@ -82,9 +78,6 @@ type session struct {
 	// local information
 	installID string // telepresence's install ID
 	clientID  string // "laptop-username@laptop-hostname"
-
-	// Kubernetes Port Forward Dialer
-	pfDialer dnet.PortForwardDialer
 
 	// manager client
 	managerClient manager.ManagerClient
@@ -129,8 +122,6 @@ type session struct {
 	ingressInfo []*manager.IngressInfo
 
 	isPodDaemon bool
-
-	sessionConfig client.Config
 
 	// done is closed when the session ends
 	done chan struct{}
@@ -186,12 +177,13 @@ func NewSession(
 	}()
 
 	dlog.Info(ctx, "Connecting to k8s cluster...")
-	cluster, err := k8s.ConnectCluster(ctx, cr, config)
+	ctx, cluster, err := k8s.ConnectCluster(ctx, cr, config)
 	if err != nil {
 		dlog.Errorf(ctx, "unable to track k8s cluster: %+v", err)
 		return ctx, nil, connectError(rpc.ConnectInfo_CLUSTER_FAILED, err)
 	}
 	dlog.Infof(ctx, "Connected to context %s, namespace %s (%s)", cluster.Context, cluster.Namespace, cluster.Server)
+	ctx = portforward.WithRestConfig(ctx, cluster.Kubeconfig.RestConfig)
 
 	ctx = cluster.WithJoinedClientSetInterface(ctx)
 	scout.SetMetadatum(ctx, "cluster_id", cluster.GetClusterId(ctx))
@@ -210,33 +202,42 @@ func NewSession(
 	// store session in ctx for reporting
 	ctx = scout.WithSession(ctx, tmgr)
 
-	tmgr.sessionConfig = client.GetDefaultConfig()
+	var tmCfg client.Config
 	cliCfg, err := tmgr.managerClient.GetClientConfig(ctx, &empty.Empty{})
 	if err != nil {
 		if status.Code(err) != codes.Unimplemented {
 			dlog.Warnf(ctx, "Failed to get remote config from traffic manager: %v", err)
 		}
+		tmCfg = client.GetDefaultConfig()
 	} else {
-		if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
-			dlog.Debug(ctx, "Applying client configuration from cluster")
-			sc := bufio.NewScanner(bytes.NewReader(cliCfg.ConfigYaml))
-			for sc.Scan() {
-				dlog.Debug(ctx, sc.Text())
-			}
-		}
-		if err := yaml.Unmarshal(cliCfg.ConfigYaml, tmgr.sessionConfig); err != nil {
-			dlog.Warnf(ctx, "Failed to deserialize remote config: %v", err)
-		}
-		if err := tmgr.ApplyConfig(ctx); err != nil {
-			dlog.Warnf(ctx, "failed to apply config from traffic-manager: %v", err)
-		}
-		if err := cluster.AddRemoteKubeConfigExtension(ctx, cliCfg.ConfigYaml); err != nil {
-			dlog.Warnf(ctx, "Failed to set remote kubeconfig values: %v", err)
+		tmCfg, err = client.ParseConfigYAML(ctx, "client configuration from cluster", cliCfg.ConfigYaml)
+		if err != nil {
+			dlog.Warn(ctx, err.Error())
 		}
 	}
-	ctx = dnet.WithPortForwardDialer(ctx, tmgr.pfDialer)
 
-	oi := tmgr.getOutboundInfo(ctx, cr)
+	// Merge traffic-manager's reported config, but get priority to the local config.
+	cfg := client.GetConfig(ctx)
+	if tmCfg != nil {
+		cfg = tmCfg.Merge(cfg)
+		rt := cfg.Routing()
+		rt.NeverProxy = append(rt.NeverProxy, tmCfg.Routing().NeverProxy...)
+		ctx = client.WithConfig(ctx, cfg)
+	}
+	if err = tmgr.ApplyConfig(ctx); err != nil {
+		dlog.Warn(ctx, err.Error())
+	}
+	if dlog.MaxLogLevel(ctx) >= dlog.LogLevelDebug {
+		dlog.Debug(ctx, "Applying client configuration")
+		buf, _ := client.MarshalJSON(cfg)
+		buf, _ = yaml.JSONToYAML(buf)
+		sc := bufio.NewScanner(bytes.NewReader(buf))
+		for sc.Scan() {
+			dlog.Debug(ctx, sc.Text())
+		}
+	}
+
+	oi := tmgr.getNetworkInfo(ctx, cr)
 	if !userd.GetService(ctx).RootSessionInProcess() {
 		// Connect to the root daemon if it is running. It's the CLI that starts it initially
 		rootRunning, err := socket.IsRunning(ctx, socket.RootDaemonPath(ctx))
@@ -244,7 +245,7 @@ func NewSession(
 			return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, err)
 		}
 		if !rootRunning {
-			return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, errors.New("rot daemon is not running"))
+			return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, errors.New("root daemon is not running"))
 		}
 
 		if client.GetConfig(ctx).Cluster().ConnectFromRootDaemon {
@@ -260,16 +261,13 @@ func NewSession(
 			if err != nil {
 				return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, err)
 			}
-			patcher.AnnotateOutboundInfo(ctx, oi, konfig.CurrentContext)
+			patcher.AnnotateNetworkConfig(ctx, oi, konfig.CurrentContext)
 		}
 	}
 
 	tmgr.rootDaemon, err = tmgr.connectRootDaemon(ctx, oi, cr.IsPodDaemon)
 	if err != nil {
 		tmgr.managerConn.Close()
-		return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, err)
-	}
-	if err != nil {
 		return ctx, nil, connectError(rpc.ConnectInfo_DAEMON_FAILED, err)
 	}
 
@@ -322,10 +320,6 @@ func (s *session) ManagerVersion() semver.Version {
 	return s.managerVersion
 }
 
-func (s *session) getSessionConfig() client.Config {
-	return s.sessionConfig
-}
-
 // connectMgr returns a session for the given cluster that is connected to the traffic-manager.
 func connectMgr(
 	ctx context.Context,
@@ -338,17 +332,13 @@ func connectMgr(
 	ctx, cancel := tos.TimeoutContext(ctx, client.TimeoutTrafficManagerConnect)
 	defer cancel()
 
-	err := CheckTrafficManagerService(ctx, cluster.GetManagerNamespace())
+	mgrNs := k8s.GetManagerNamespace(ctx)
+	err := CheckTrafficManagerService(ctx, mgrNs)
 	if err != nil {
 		return nil, err
 	}
 
-	dlog.Debug(ctx, "creating port-forward")
-	pfDialer, err := dnet.NewK8sPortForwardDialer(ctx, cluster.Kubeconfig.RestConfig, k8sapi.GetK8sInterface(ctx))
-	if err != nil {
-		return nil, err
-	}
-	conn, mClient, vi, err := k8sclient.ConnectToManager(ctx, cluster.GetManagerNamespace(), pfDialer.Dial)
+	conn, mClient, vi, err := k8sclient.ConnectToManager(ctx, mgrNs)
 	if err != nil {
 		return nil, err
 	}
@@ -425,25 +415,6 @@ func connectMgr(
 		managerName = "Traffic Manager"
 	}
 
-	extraAlsoProxy, err := parseCIDR(cr.GetAlsoProxy())
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse extra also proxy: %w", err)
-	}
-
-	extraNeverProxy, err := parseCIDR(cr.GetNeverProxy())
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse extra never proxy: %w", err)
-	}
-
-	extraAllow, err := parseCIDR(cr.GetAllowConflictingSubnets())
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse extra allow conflicting subnets: %w", err)
-	}
-
-	cluster.AlsoProxy = append(cluster.AlsoProxy, extraAlsoProxy...)
-	cluster.NeverProxy = append(cluster.NeverProxy, extraNeverProxy...)
-	cluster.AllowConflictingSubnets = append(cluster.AllowConflictingSubnets, extraAllow...)
-
 	knownWorkloadKinds, err := mClient.GetKnownWorkloadKinds(ctx, si)
 	if err != nil {
 		if status.Code(err) != codes.Unimplemented {
@@ -464,7 +435,6 @@ func connectMgr(
 		clientID:           clientID,
 		managerClient:      mClient,
 		managerConn:        conn,
-		pfDialer:           pfDialer,
 		managerName:        managerName,
 		managerVersion:     managerVersion,
 		sessionInfo:        si,
@@ -495,24 +465,6 @@ func (s *session) Remain(ctx context.Context) error {
 		dlog.Errorf(ctx, "error calling Remain: %v", client.CheckTimeout(ctx, err))
 	}
 	return nil
-}
-
-func parseCIDR(cidr []string) ([]*iputil.Subnet, error) {
-	result := make([]*iputil.Subnet, 0)
-
-	if cidr == nil {
-		return result, nil
-	}
-
-	for i := range cidr {
-		_, ipNet, err := net.ParseCIDR(cidr[i])
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse CIDR %s: %w", cidr[i], err)
-		}
-		result = append(result, (*iputil.Subnet)(ipNet))
-	}
-
-	return result, nil
 }
 
 func CheckTrafficManagerService(ctx context.Context, namespace string) error {
@@ -571,7 +523,6 @@ func (s *session) updateDaemonNamespaces(c context.Context) {
 
 func (s *session) Epilog(ctx context.Context) {
 	_, _ = s.rootDaemon.Disconnect(ctx, &empty.Empty{})
-	_ = s.pfDialer.Close()
 	dlog.Info(ctx, "-- Session ended")
 	close(s.done)
 }
@@ -606,11 +557,7 @@ func (s *session) SessionInfo() *manager.SessionInfo {
 }
 
 func (s *session) ApplyConfig(ctx context.Context) error {
-	cfg, err := client.LoadConfig(ctx)
-	if err != nil {
-		return err
-	}
-	err = client.MergeAndReplace(ctx, s.sessionConfig, cfg, false)
+	err := client.ReloadDaemonLogLevel(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -620,7 +567,7 @@ func (s *session) ApplyConfig(ctx context.Context) error {
 			s.SetMappedNamespaces(ctx, mns)
 		}
 	}
-	return err
+	return nil
 }
 
 // getInfosForWorkloads returns a list of workloads found in the given namespace that fulfils the given filter criteria.
@@ -632,7 +579,7 @@ func (s *session) getInfosForWorkloads(
 	filter rpc.ListRequest_Filter,
 ) []*rpc.WorkloadInfo {
 	wiMap := make(map[types.UID]*rpc.WorkloadInfo)
-	s.wlWatcher.eachWorkload(ctx, s.GetManagerNamespace(), namespaces, func(workload k8sapi.Workload) {
+	s.wlWatcher.eachWorkload(ctx, k8s.GetManagerNamespace(ctx), namespaces, func(workload k8sapi.Workload) {
 		name := workload.GetName()
 		dlog.Debugf(ctx, "Getting info for %s %s.%s, matching service", workload.GetKind(), name, workload.GetNamespace())
 
@@ -839,7 +786,7 @@ func (s *session) remainLoop(c context.Context) error {
 
 func (s *session) UpdateStatus(c context.Context, cri userd.ConnectRequest) *rpc.ConnectInfo {
 	cr := cri.Request()
-	config, err := client.DaemonKubeconfig(c, cr)
+	c, config, err := client.DaemonKubeconfig(c, cr)
 	if err != nil {
 		return connectError(rpc.ConnectInfo_CLUSTER_FAILED, err)
 	}
@@ -910,7 +857,7 @@ func (s *session) status(c context.Context, initial bool) *rpc.ConnectInfo {
 			Name:    s.managerName,
 			Version: "v" + s.managerVersion.String(),
 		},
-		ManagerNamespace:   cfg.GetManagerNamespace(),
+		ManagerNamespace:   k8s.GetManagerNamespace(c),
 		SubnetViaWorkloads: s.subnetViaWorkloads,
 		Version: &common.VersionInfo{
 			ApiVersion: client.APIVersion,
@@ -922,7 +869,7 @@ func (s *session) status(c context.Context, initial bool) *rpc.ConnectInfo {
 	if !initial {
 		ret.Error = rpc.ConnectInfo_ALREADY_CONNECTED
 	}
-	if len(s.MappedNamespaces) > 0 || len(s.sessionConfig.Cluster().MappedNamespaces) > 0 {
+	if len(s.MappedNamespaces) > 0 || len(client.GetConfig(c).Cluster().MappedNamespaces) > 0 {
 		ret.MappedNamespaces = s.GetCurrentNamespaces(true)
 	}
 	var err error
@@ -1038,93 +985,27 @@ func (s *session) Uninstall(ctx context.Context, ur *rpc.UninstallRequest) (*com
 	return errcat.ToResult(nil), nil
 }
 
-func (s *session) getOutboundInfo(ctx context.Context, cr *rpc.ConnectRequest) *rootdRpc.OutboundInfo {
-	// We'll figure out the IP address of the API server(s) so that we can tell the daemon never to proxy them.
-	// This is because in some setups the API server will be in the same CIDR range as the pods, and the
-	// daemon will attempt to proxy traffic to it. This usually results in a loss of all traffic to/from
-	// the cluster, since an open tunnel to the traffic-manager (via the API server) is itself required
-	// to communicate with the cluster.
-	neverProxy := make([]*manager.IPNet, 0, 1+len(s.NeverProxy))
-	serverURL, err := url.Parse(s.Server)
-	if err != nil {
-		// This really shouldn't happen as we are connected to the server
-		dlog.Errorf(ctx, "Unable to parse url for k8s server %s: %v", s.Server, err)
-	} else {
-		hostname := serverURL.Hostname()
-		rawIP := iputil.Parse(hostname)
-		ips := []net.IP{rawIP}
-		if rawIP == nil {
-			var err error
-			ips, err = net.LookupIP(hostname)
-			if err != nil {
-				dlog.Errorf(ctx, "Unable to do DNS lookup for k8s server %s: %v", hostname, err)
-				ips = []net.IP{}
-			}
-		}
-		for _, ip := range ips {
-			mask := net.CIDRMask(128, 128)
-			if ipv4 := ip.To4(); ipv4 != nil {
-				mask = net.CIDRMask(32, 32)
-				ip = ipv4
-			}
-			if !ip.IsLoopback() {
-				ipnet := &net.IPNet{IP: ip, Mask: mask}
-				neverProxy = append(neverProxy, iputil.IPNetToRPC(ipnet))
-			}
-		}
-	}
-	for _, np := range s.NeverProxy {
-		neverProxy = append(neverProxy, iputil.IPNetToRPC((*net.IPNet)(np)))
-	}
-	info := &rootdRpc.OutboundInfo{
+func (s *session) getNetworkInfo(ctx context.Context, cr *rpc.ConnectRequest) *rootdRpc.NetworkConfig {
+	cfg := client.GetConfig(ctx)
+	jsonCfg, _ := client.MarshalJSON(cfg)
+	return &rootdRpc.NetworkConfig{
 		Session:            s.sessionInfo,
-		NeverProxySubnets:  neverProxy,
+		ClientConfig:       jsonCfg,
 		HomeDir:            homedir.HomeDir(),
 		Namespace:          s.Namespace,
-		ManagerNamespace:   s.GetManagerNamespace(),
 		SubnetViaWorkloads: s.subnetViaWorkloads,
 		KubeFlags:          cr.KubeFlags,
 		KubeconfigData:     cr.KubeconfigData,
 	}
-
-	if s.DNS != nil {
-		info.Dns = &rootdRpc.DNSConfig{
-			ExcludeSuffixes: s.DNS.ExcludeSuffixes,
-			IncludeSuffixes: s.DNS.IncludeSuffixes,
-			Excludes:        s.DNS.Excludes,
-			Mappings:        s.DNS.Mappings.ToRPC(),
-			LookupTimeout:   durationpb.New(s.DNS.LookupTimeout.Duration),
-		}
-		if len(s.DNS.LocalIP) > 0 {
-			info.Dns.LocalIp = s.DNS.LocalIP.IP()
-		}
-		if len(s.DNS.RemoteIP) > 0 {
-			info.Dns.RemoteIp = s.DNS.RemoteIP.IP()
-		}
-	}
-
-	if len(s.AlsoProxy) > 0 {
-		info.AlsoProxySubnets = make([]*manager.IPNet, len(s.AlsoProxy))
-		for i, ap := range s.AlsoProxy {
-			info.AlsoProxySubnets[i] = iputil.IPNetToRPC((*net.IPNet)(ap))
-		}
-	}
-	if len(s.AllowConflictingSubnets) > 0 {
-		info.AllowConflictingSubnets = make([]*manager.IPNet, len(s.AllowConflictingSubnets))
-		for i, ap := range s.AllowConflictingSubnets {
-			info.AllowConflictingSubnets[i] = iputil.IPNetToRPC((*net.IPNet)(ap))
-		}
-	}
-	return info
 }
 
-func (s *session) connectRootDaemon(ctx context.Context, oi *rootdRpc.OutboundInfo, isPodDaemon bool) (rd rootdRpc.DaemonClient, err error) {
+func (s *session) connectRootDaemon(ctx context.Context, nc *rootdRpc.NetworkConfig, isPodDaemon bool) (rd rootdRpc.DaemonClient, err error) {
 	// establish a connection to the root daemon gRPC grpcService
 	dlog.Info(ctx, "Connecting to root daemon...")
 	svc := userd.GetService(ctx)
 	if svc.RootSessionInProcess() {
 		// Just run the root session in-process.
-		rootSession, err := rootd.NewInProcSession(ctx, oi, s.managerClient, s.managerVersion, isPodDaemon)
+		_, rootSession, err := rootd.NewInProcSession(ctx, nc, s.managerClient, s.managerVersion, isPodDaemon)
 		if err != nil {
 			return nil, err
 		}
@@ -1150,7 +1031,7 @@ func (s *session) connectRootDaemon(ctx context.Context, oi *rootdRpc.OutboundIn
 		for attempt := 1; ; attempt++ {
 			var rootStatus *rootdRpc.DaemonStatus
 			tCtx, tCancel := context.WithTimeout(ctx, 15*time.Second)
-			rootStatus, err = rd.Connect(tCtx, oi)
+			rootStatus, err = rd.Connect(tCtx, nc)
 			tCancel()
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to root daemon: %w", err)
@@ -1160,7 +1041,7 @@ func (s *session) connectRootDaemon(ctx context.Context, oi *rootdRpc.OutboundIn
 				// This is an internal error. Something is wrong with the root daemon.
 				return nil, errors.New("root daemon's OutboundConfig has no Session")
 			}
-			if oc.Session.SessionId == oi.Session.SessionId {
+			if oc.Session.SessionId == nc.Session.SessionId {
 				break
 			}
 

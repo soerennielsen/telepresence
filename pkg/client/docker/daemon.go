@@ -4,7 +4,6 @@ package docker
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -21,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	dockerClient "github.com/docker/docker/client"
+	"github.com/go-json-experiment/json"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	runtime2 "k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +33,6 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/daemon"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/docker/kubeauth"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/filelocation"
 	"github.com/telepresenceio/telepresence/v2/pkg/iputil"
@@ -66,7 +65,7 @@ func ClientImage(ctx context.Context) string {
 
 // DaemonOptions returns the options necessary to pass to a docker run when starting a daemon container.
 func DaemonOptions(ctx context.Context, daemonID *daemon.Identifier) ([]string, *net.TCPAddr, error) {
-	as, err := dnet.FreePortsTCP(1)
+	as, err := client.FreePortsTCP(1)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -3,7 +3,6 @@ package intercept
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 	grpcCodes "google.golang.org/grpc/codes"
 	grpcStatus "google.golang.org/grpc/status"
 	empty "google.golang.org/protobuf/types/known/emptypb"
@@ -29,7 +30,6 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/spinner"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/docker"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/scout"
-	"github.com/telepresenceio/telepresence/v2/pkg/dnet"
 	"github.com/telepresenceio/telepresence/v2/pkg/dos"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/ioutil"
@@ -116,7 +116,7 @@ func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRe
 		if ud.Containerized() && ir.LocalMountPort == 0 {
 			// No use having the remote container actually mount, so let's have it create a bridge
 			// to the remote sftp server instead.
-			lma, err := dnet.FreePortsTCP(1)
+			lma, err := client.FreePortsTCP(1)
 			if err != nil {
 				return nil, err
 			}
@@ -472,7 +472,7 @@ func (s *state) writeEnvToFileAndClose(file *os.File) (err error) {
 }
 
 func (s *state) writeEnvJSON() error {
-	data, err := json.MarshalIndent(s.env, "", "  ")
+	data, err := json.Marshal(s.env, jsontext.WithIndent("  "))
 	if err != nil {
 		// Creating JSON from a map[string]string should never fail
 		panic(err)
