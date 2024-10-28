@@ -242,6 +242,12 @@ spec:
           {{- end }}
           {{- end }}
           {{- end }}
+          {{- with .compatibility }}
+          {{- if .version }}
+          - name: COMPATIBILITY_VERSION
+            value: {{ .version }}
+          {{- end }}
+          {{- end }}
         {{- if and .trafficManager .trafficManager.envTemplate }}
           {{- template "traffic-manager-env" . }}
         {{- end }}

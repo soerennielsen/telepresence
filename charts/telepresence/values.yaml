@@ -349,3 +349,12 @@ client:
 workloads:
   argoRollouts:
     enabled: false
+
+# Use for testing only.
+compatibility:
+  # Controls the enablement of features more recent than the given version. Only applicable
+  # for versions 2.18.0 and up, and only recognized by versions 2.21.0 and up. In other words,
+  # you can make a 2.21.0 version behave as far back as a 2.18.0 version, but you cannot
+  # alter the behavior of versions earlier than 2.21.0.
+  #
+  # version: 2.19.0

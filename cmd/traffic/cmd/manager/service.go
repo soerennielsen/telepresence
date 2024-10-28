@@ -2,10 +2,12 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/google/uuid"
 	dns2 "github.com/miekg/dns"
 	"go.opentelemetry.io/otel/trace"
@@ -76,6 +78,15 @@ type wall struct{}
 
 func (wall) Now() time.Time {
 	return time.Now()
+}
+
+// checkCompat checks if a CompatibilityVersion has been set for this traffic-manager, and if so, errors with
+// an Unimplemented error mentioning the given name if it is less than the required version.
+func checkCompat(ctx context.Context, name, requiredVersion string) error {
+	if cv := managerutil.GetEnv(ctx).CompatibilityVersion; cv != nil && cv.Compare(semver.MustParse(requiredVersion)) < 0 {
+		return status.Error(codes.Unimplemented, fmt.Sprintf("traffic manager of version %s does not implement %s", cv, name))
+	}
+	return nil
 }
 
 func NewService(ctx context.Context) (Service, *dgroup.Group, error) {
@@ -567,6 +578,9 @@ func (s *service) PrepareIntercept(ctx context.Context, request *rpc.CreateInter
 }
 
 func (s *service) GetKnownWorkloadKinds(ctx context.Context, request *rpc.SessionInfo) (*rpc.KnownWorkloadKinds, error) {
+	if err := checkCompat(ctx, "GetKnownWorkloadKinds", "2.20.0"); err != nil {
+		return nil, err
+	}
 	ctx = managerutil.WithSessionInfo(ctx, request)
 	dlog.Debugf(ctx, "GetKnownWorkloadKinds called")
 	kinds := []rpc.WorkloadInfo_Kind{rpc.WorkloadInfo_DEPLOYMENT, rpc.WorkloadInfo_REPLICASET, rpc.WorkloadInfo_STATEFULSET}
@@ -939,7 +953,12 @@ func (s *service) WatchClusterInfo(session *rpc.SessionInfo, stream rpc.Manager_
 }
 
 func (s *service) WatchWorkloads(request *rpc.WorkloadEventsRequest, stream rpc.Manager_WatchWorkloadsServer) (err error) {
-	ctx := managerutil.WithSessionInfo(stream.Context(), request.SessionInfo)
+	ctx := stream.Context()
+	// Dysfunctional prior to 2.21.0 because no initial snapshot was sent.
+	if err := checkCompat(ctx, "WatchWorkloads", "2.21.0-alpha.4"); err != nil {
+		return err
+	}
+	ctx = managerutil.WithSessionInfo(ctx, request.SessionInfo)
 	defer func() {
 		if r := recover(); r != nil {
 			err = derror.PanicToError(r)
