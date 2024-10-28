@@ -32,6 +32,7 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/log"
 	"github.com/telepresenceio/telepresence/v2/pkg/tracing"
 	"github.com/telepresenceio/telepresence/v2/pkg/tunnel"
+	"github.com/telepresenceio/telepresence/v2/pkg/workload"
 )
 
 type State interface {
@@ -90,7 +91,7 @@ type State interface {
 	WatchAgents(context.Context, func(sessionID string, agent *rpc.AgentInfo) bool) <-chan watchable.Snapshot[*rpc.AgentInfo]
 	WatchDial(sessionID string) <-chan *rpc.DialRequest
 	WatchIntercepts(context.Context, func(sessionID string, intercept *rpc.InterceptInfo) bool) <-chan watchable.Snapshot[*rpc.InterceptInfo]
-	WatchWorkloads(ctx context.Context, sessionID string) (ch <-chan []WorkloadEvent, err error)
+	WatchWorkloads(ctx context.Context, sessionID string) (ch <-chan []workload.WorkloadEvent, err error)
 	WatchLookupDNS(string) <-chan *rpc.DNSRequest
 	ValidateCreateAgent(context.Context, k8sapi.Workload, agentconfig.SidecarExt) error
 	NewWorkloadInfoWatcher(clientSession, namespace string) WorkloadInfoWatcher
@@ -135,7 +136,7 @@ type state struct {
 	interceptStates            *xsync.MapOf[string, *interceptState]
 	timedLogLevel              log.TimedLevel
 	llSubs                     *loglevelSubscribers
-	workloadWatchers           *xsync.MapOf[string, WorkloadWatcher] // workload watchers, created on demand and keyed by namespace
+	workloadWatchers           *xsync.MapOf[string, workload.Watcher] // workload watchers, created on demand and keyed by namespace
 	tunnelCounter              int32
 	tunnelIngressCounter       uint64
 	tunnelEgressCounter        uint64
@@ -157,7 +158,7 @@ func NewState(ctx context.Context) State {
 		sessions:         xsync.NewMapOf[string, SessionState](),
 		agentsByName:     xsync.NewMapOf[string, *xsync.MapOf[string, *rpc.AgentInfo]](),
 		interceptStates:  xsync.NewMapOf[string, *interceptState](),
-		workloadWatchers: xsync.NewMapOf[string, WorkloadWatcher](),
+		workloadWatchers: xsync.NewMapOf[string, workload.Watcher](),
 		timedLogLevel:    log.NewTimedLevel(loglevel, log.SetLevel),
 		llSubs:           newLoglevelSubscribers(),
 	}
@@ -487,14 +488,14 @@ func (s *state) WatchAgents(
 	}
 }
 
-func (s *state) WatchWorkloads(ctx context.Context, sessionID string) (ch <-chan []WorkloadEvent, err error) {
+func (s *state) WatchWorkloads(ctx context.Context, sessionID string) (ch <-chan []workload.WorkloadEvent, err error) {
 	client := s.GetClient(sessionID)
 	if client == nil {
 		return nil, status.Errorf(codes.NotFound, "session %q not found", sessionID)
 	}
 	ns := client.Namespace
-	ww, _ := s.workloadWatchers.LoadOrCompute(ns, func() (ww WorkloadWatcher) {
-		ww, err = NewWorkloadWatcher(s.backgroundCtx, ns)
+	ww, _ := s.workloadWatchers.LoadOrCompute(ns, func() (ww workload.Watcher) {
+		ww, err = workload.NewWatcher(s.backgroundCtx, ns, managerutil.ArgoRolloutsEnabled(ctx))
 		return ww
 	})
 	if err != nil {

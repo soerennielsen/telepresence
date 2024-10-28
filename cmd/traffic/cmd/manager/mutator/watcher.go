@@ -33,6 +33,7 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/agentmap"
 	"github.com/telepresenceio/telepresence/v2/pkg/informer"
 	"github.com/telepresenceio/telepresence/v2/pkg/tracing"
+	"github.com/telepresenceio/telepresence/v2/pkg/workload"
 )
 
 type Map interface {
@@ -229,8 +230,6 @@ func isRolloutNeededForPod(ctx context.Context, ac *agentconfig.Sidecar, name, n
 	return ""
 }
 
-const AnnRestartedAt = DomainPrefix + "restartedAt"
-
 func (c *configWatcher) triggerRollout(ctx context.Context, wl k8sapi.Workload, ac *agentconfig.Sidecar) {
 	lck := c.getRolloutLock(wl)
 	if !lck.TryLock() {
@@ -269,10 +268,10 @@ func generateRestartAnnotationPatch(podTemplate *core.PodTemplateSpec) string {
 	basePointer := "/spec/template/metadata/annotations"
 	pointer := fmt.Sprintf(
 		basePointer+"/%s",
-		strings.ReplaceAll(AnnRestartedAt, "/", "~1"),
+		strings.ReplaceAll(workload.AnnRestartedAt, "/", "~1"),
 	)
 
-	if _, ok := podTemplate.Annotations[AnnRestartedAt]; ok {
+	if _, ok := podTemplate.Annotations[workload.AnnRestartedAt]; ok {
 		return fmt.Sprintf(
 			`[{"op": "replace", "path": "%s", "value": "%s"}]`, pointer, time.Now().Format(time.RFC3339),
 		)
@@ -833,9 +832,9 @@ func (c *configWatcher) Start(ctx context.Context) {
 	for i, ns := range nss {
 		c.cms[i] = c.startConfigMap(ctx, ns)
 		c.svs[i] = c.startServices(ctx, ns)
-		c.dps[i] = c.startDeployments(ctx, ns)
-		c.rss[i] = c.startReplicaSets(ctx, ns)
-		c.sss[i] = c.startStatefulSets(ctx, ns)
+		c.dps[i] = workload.StartDeployments(ctx, ns)
+		c.rss[i] = workload.StartReplicaSets(ctx, ns)
+		c.sss[i] = workload.StartStatefulSets(ctx, ns)
 		c.startPods(ctx, ns)
 		kf := informer.GetK8sFactory(ctx, ns)
 		kf.Start(ctx.Done())
@@ -844,7 +843,7 @@ func (c *configWatcher) Start(ctx context.Context) {
 	if managerutil.ArgoRolloutsEnabled(ctx) {
 		c.rls = make([]cache.SharedIndexInformer, len(nss))
 		for i, ns := range nss {
-			c.rls[i] = c.startRollouts(ctx, ns)
+			c.rls[i] = workload.StartRollouts(ctx, ns)
 			rf := informer.GetArgoRolloutsFactory(ctx, ns)
 			rf.Start(ctx.Done())
 			rf.WaitForCacheSync(ctx.Done())

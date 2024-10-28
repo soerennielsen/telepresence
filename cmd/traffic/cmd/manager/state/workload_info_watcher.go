@@ -15,6 +15,7 @@ import (
 	rpc "github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/cmd/traffic/cmd/manager/mutator"
 	"github.com/telepresenceio/telepresence/v2/pkg/agentmap"
+	"github.com/telepresenceio/telepresence/v2/pkg/workload"
 )
 
 type WorkloadInfoWatcher interface {
@@ -187,13 +188,20 @@ func rpcWorkload(wl k8sapi.Workload, as rpc.WorkloadInfo_AgentState, iClients []
 		Kind:             rpcKind(wl.GetKind()),
 		Name:             wl.GetName(),
 		Namespace:        wl.GetNamespace(),
+		Uid:              string(wl.GetUID()),
 		State:            rpcWorkloadState(mutator.GetWorkloadState(wl)),
 		AgentState:       as,
 		InterceptClients: iClients,
 	}
 }
 
-func (wf *workloadInfoWatcher) addEvent(ctx context.Context, eventType EventType, wl k8sapi.Workload, as rpc.WorkloadInfo_AgentState, iClients []*rpc.WorkloadInfo_Intercept) {
+func (wf *workloadInfoWatcher) addEvent(
+	ctx context.Context,
+	eventType workload.EventType,
+	wl k8sapi.Workload,
+	as rpc.WorkloadInfo_AgentState,
+	iClients []*rpc.WorkloadInfo_Intercept,
+) {
 	wf.workloadEvents[wl.GetName()] = &rpc.WorkloadEvent{
 		Type:     rpc.WorkloadEvent_Type(eventType),
 		Workload: rpcWorkload(wl, as, iClients),
@@ -201,11 +209,11 @@ func (wf *workloadInfoWatcher) addEvent(ctx context.Context, eventType EventType
 	wf.sendEvents(ctx)
 }
 
-func (wf *workloadInfoWatcher) handleWorkloadsSnapshot(ctx context.Context, wes []WorkloadEvent) {
+func (wf *workloadInfoWatcher) handleWorkloadsSnapshot(ctx context.Context, wes []workload.WorkloadEvent) {
 	for _, we := range wes {
 		wl := we.Workload
 		if w, ok := wf.workloadEvents[wl.GetName()]; ok {
-			if we.Type == EventTypeDelete && w.Type != rpc.WorkloadEvent_DELETED {
+			if we.Type == workload.EventTypeDelete && w.Type != rpc.WorkloadEvent_DELETED {
 				w.Type = rpc.WorkloadEvent_DELETED
 				dlog.Debugf(ctx, "WorkloadInfoEvent: Workload %s %s %s.%s", we.Type, wl.GetKind(), wl.GetName(), wl.GetNamespace())
 				wf.resetTicker()
@@ -224,7 +232,7 @@ func (wf *workloadInfoWatcher) handleWorkloadsSnapshot(ctx context.Context, wes 
 
 			// If we've sent an ADDED event for this workload, and this is a MODIFIED event without any changes that
 			// we care about, then just skip it.
-			if we.Type == EventTypeUpdate {
+			if we.Type == workload.EventTypeUpdate {
 				lew, ok := wf.lastEvents[wl.GetName()]
 				if ok && (lew.Type == rpc.WorkloadEvent_ADDED_UNSPECIFIED || lew.Type == rpc.WorkloadEvent_MODIFIED) &&
 					proto.Equal(lew.Workload, rpcWorkload(we.Workload, as, iClients)) {
@@ -252,7 +260,7 @@ func (wf *workloadInfoWatcher) handleAgentSnapshot(ctx context.Context, ais map[
 					wf.resetTicker()
 				}
 			} else if wl, err := agentmap.GetWorkload(ctx, name, a.Namespace, ""); err == nil {
-				wf.addEvent(ctx, EventTypeUpdate, wl, as, nil)
+				wf.addEvent(ctx, workload.EventTypeUpdate, wl, as, nil)
 			} else {
 				dlog.Debugf(ctx, "Unable to get workload %s.%s: %v", name, a.Namespace, err)
 				if errors.IsNotFound(err) {
@@ -286,7 +294,7 @@ func (wf *workloadInfoWatcher) handleAgentSnapshot(ctx context.Context, ais map[
 				wf.resetTicker()
 			}
 		} else if wl, err := agentmap.GetWorkload(ctx, name, a.Namespace, ""); err == nil {
-			wf.addEvent(ctx, EventTypeUpdate, wl, as, iClients)
+			wf.addEvent(ctx, workload.EventTypeUpdate, wl, as, iClients)
 		} else {
 			dlog.Debugf(ctx, "Unable to get workload %s.%s: %v", name, a.Namespace, err)
 		}
@@ -308,7 +316,7 @@ func (wf *workloadInfoWatcher) handleInterceptSnapshot(ctx context.Context, iis 
 					wf.resetTicker()
 				}
 			} else if wl, err := agentmap.GetWorkload(ctx, name, wf.namespace, ""); err == nil {
-				wf.addEvent(ctx, EventTypeUpdate, wl, as, nil)
+				wf.addEvent(ctx, workload.EventTypeUpdate, wl, as, nil)
 			}
 		}
 	}
@@ -332,7 +340,7 @@ func (wf *workloadInfoWatcher) handleInterceptSnapshot(ctx context.Context, iis 
 				wf.resetTicker()
 			}
 		} else if wl, err := agentmap.GetWorkload(ctx, name, wf.namespace, ""); err == nil {
-			wf.addEvent(ctx, EventTypeUpdate, wl, as, iClients)
+			wf.addEvent(ctx, workload.EventTypeUpdate, wl, as, iClients)
 		}
 	}
 }
