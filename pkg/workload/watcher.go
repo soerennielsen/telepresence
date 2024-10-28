@@ -113,6 +113,7 @@ func (w *watcher) Subscribe(ctx context.Context) <-chan []WorkloadEvent {
 	id := uuid.New()
 	kf := informer.GetFactory(ctx, w.namespace)
 	ai := kf.GetK8sInformerFactory().Apps().V1()
+	dlog.Debugf(ctx, "workload.Watcher producing initial events for namespace %s", w.namespace)
 	if dps, err := ai.Deployments().Lister().Deployments(w.namespace).List(labels.Everything()); err == nil {
 		for _, obj := range dps {
 			if wl, ok := FromAny(obj); ok && !hasValidReplicasetOwner(wl, w.rolloutsEnabled) {
@@ -204,7 +205,7 @@ func (w *watcher) watch(ix cache.SharedIndexInformer, ns string, hasValidControl
 			},
 			DeleteFunc: func(obj any) {
 				if wl, ok := FromAny(obj); ok {
-					if ns == wl.GetNamespace() && len(wl.GetOwnerReferences()) == 0 {
+					if ns == wl.GetNamespace() && !hasValidController(wl) {
 						w.handleEvent(WorkloadEvent{Type: EventTypeDelete, Workload: wl})
 					}
 				} else if dfsu, ok := obj.(*cache.DeletedFinalStateUnknown); ok {
@@ -267,5 +268,5 @@ func (w *watcher) handleEvent(we WorkloadEvent) {
 	w.Unlock()
 
 	// Defers sending until things been quiet for a while
-	w.timer.Reset(50 * time.Millisecond)
+	w.timer.Reset(5 * time.Millisecond)
 }

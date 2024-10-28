@@ -163,6 +163,7 @@ func (s *notConnectedSuite) Test_WorkspaceListener() {
 						expectations["agent installed"] = true
 					}
 				case manager.WorkloadInfo_INTERCEPTED:
+					expectations["agent installed"] = true
 					expectations["agent intercepted"] = true
 					if ics := ev.Workload.InterceptClients; len(ics) == 1 {
 						interceptingClient = ics[0].Client

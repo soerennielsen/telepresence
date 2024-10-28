@@ -22,7 +22,7 @@ func (c *configWatcher) watchWorkloads(ctx context.Context, ix cache.SharedIndex
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj any) {
 				if wl, ok := workload.FromAny(obj); ok && len(wl.GetOwnerReferences()) == 0 {
-					c.updateWorkload(ctx, wl, nil, GetWorkloadState(wl))
+					c.updateWorkload(ctx, wl, nil, workload.GetWorkloadState(wl))
 				}
 			},
 			DeleteFunc: func(obj any) {
@@ -39,7 +39,7 @@ func (c *configWatcher) watchWorkloads(ctx context.Context, ix cache.SharedIndex
 			UpdateFunc: func(oldObj, newObj any) {
 				if wl, ok := workload.FromAny(newObj); ok && len(wl.GetOwnerReferences()) == 0 {
 					if oldWl, ok := workload.FromAny(oldObj); ok {
-						c.updateWorkload(ctx, wl, oldWl, GetWorkloadState(wl))
+						c.updateWorkload(ctx, wl, oldWl, workload.GetWorkloadState(wl))
 					}
 				}
 			},
@@ -59,8 +59,8 @@ func (c *configWatcher) deleteWorkload(ctx context.Context, wl k8sapi.Workload) 
 	}
 }
 
-func (c *configWatcher) updateWorkload(ctx context.Context, wl, oldWl k8sapi.Workload, state WorkloadState) {
-	if state == WorkloadStateFailure {
+func (c *configWatcher) updateWorkload(ctx context.Context, wl, oldWl k8sapi.Workload, state workload.State) {
+	if state == workload.StateFailure {
 		return
 	}
 	tpl := wl.GetPodTemplate()

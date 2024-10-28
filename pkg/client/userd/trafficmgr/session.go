@@ -17,6 +17,7 @@ import (
 
 	"github.com/blang/semver/v4"
 	"github.com/go-json-experiment/json"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -42,7 +43,6 @@ import (
 	rootdRpc "github.com/telepresenceio/telepresence/rpc/v2/daemon"
 	"github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/pkg/agentconfig"
-	"github.com/telepresenceio/telepresence/v2/pkg/agentmap"
 	authGrpc "github.com/telepresenceio/telepresence/v2/pkg/authenticator/grpc"
 	"github.com/telepresenceio/telepresence/v2/pkg/authenticator/patcher"
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
@@ -55,9 +55,11 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd/k8s"
 	"github.com/telepresenceio/telepresence/v2/pkg/errcat"
+	"github.com/telepresenceio/telepresence/v2/pkg/informer"
 	"github.com/telepresenceio/telepresence/v2/pkg/matcher"
 	"github.com/telepresenceio/telepresence/v2/pkg/proc"
 	"github.com/telepresenceio/telepresence/v2/pkg/restapi"
+	"github.com/telepresenceio/telepresence/v2/pkg/workload"
 )
 
 type apiServer struct {
@@ -68,6 +70,18 @@ type apiServer struct {
 type apiMatcher struct {
 	requestMatcher matcher.Request
 	metadata       map[string]string
+}
+
+type workloadInfoKey struct {
+	kind manager.WorkloadInfo_Kind
+	name string
+}
+
+type workloadInfo struct {
+	uid              types.UID
+	state            workload.State
+	agentState       manager.WorkloadInfo_AgentState
+	interceptClients []string
 }
 
 type session struct {
@@ -96,7 +110,12 @@ type session struct {
 
 	sessionInfo *manager.SessionInfo // sessionInfo returned by the traffic-manager
 
-	wlWatcher *workloadsAndServicesWatcher
+	workloadsLock sync.Mutex
+
+	// Map of manager.WorkloadInfo split into namespace, key of kind and name, and workloadInfo
+	workloads map[string]map[workloadInfoKey]workloadInfo
+
+	workloadSubscribers map[uuid.UUID]chan struct{}
 
 	// currentInterceptsLock ensures that all accesses to currentIntercepts, currentMatchers,
 	// currentAPIServers, interceptWaiters, and ingressInfo are synchronized
@@ -415,19 +434,6 @@ func connectMgr(
 		managerName = "Traffic Manager"
 	}
 
-	knownWorkloadKinds, err := mClient.GetKnownWorkloadKinds(ctx, si)
-	if err != nil {
-		if status.Code(err) != codes.Unimplemented {
-			return nil, fmt.Errorf("failed to get known workload kinds: %w", err)
-		}
-		// Talking to an older traffic-manager, use legacy default types
-		knownWorkloadKinds = &manager.KnownWorkloadKinds{Kinds: []manager.WorkloadInfo_Kind{
-			manager.WorkloadInfo_DEPLOYMENT,
-			manager.WorkloadInfo_REPLICASET,
-			manager.WorkloadInfo_STATEFULSET,
-		}}
-	}
-
 	sess := &session{
 		Cluster:            cluster,
 		installID:          installID,
@@ -438,8 +444,8 @@ func connectMgr(
 		managerName:        managerName,
 		managerVersion:     managerVersion,
 		sessionInfo:        si,
+		workloads:          make(map[string]map[workloadInfoKey]workloadInfo),
 		interceptWaiters:   make(map[string]*awaitIntercept),
-		wlWatcher:          newWASWatcher(knownWorkloadKinds),
 		isPodDaemon:        cr.IsPodDaemon,
 		done:               make(chan struct{}),
 		subnetViaWorkloads: cr.SubnetViaWorkloads,
@@ -507,8 +513,6 @@ func connectError(t rpc.ConnectInfo_ErrType, err error) *rpc.ConnectInfo {
 func (s *session) updateDaemonNamespaces(c context.Context) {
 	const svcDomain = "svc"
 
-	s.wlWatcher.setNamespacesToWatch(c, s.GetCurrentNamespaces(true))
-
 	domains := s.GetCurrentNamespaces(false)
 	if !slices.Contains(domains, svcDomain) {
 		domains = append(domains, svcDomain)
@@ -572,37 +576,22 @@ func (s *session) ApplyConfig(ctx context.Context) error {
 
 // getInfosForWorkloads returns a list of workloads found in the given namespace that fulfils the given filter criteria.
 func (s *session) getInfosForWorkloads(
-	ctx context.Context,
 	namespaces []string,
 	iMap map[string][]*manager.InterceptInfo,
 	sMap map[string]*rpc.WorkloadInfo_Sidecar,
 	filter rpc.ListRequest_Filter,
 ) []*rpc.WorkloadInfo {
-	wiMap := make(map[types.UID]*rpc.WorkloadInfo)
-	s.wlWatcher.eachWorkload(ctx, k8s.GetManagerNamespace(ctx), namespaces, func(workload k8sapi.Workload) {
-		name := workload.GetName()
-		dlog.Debugf(ctx, "Getting info for %s %s.%s, matching service", workload.GetKind(), name, workload.GetNamespace())
-
+	wiMap := make(map[string]*rpc.WorkloadInfo)
+	s.eachWorkload(namespaces, func(wlKind manager.WorkloadInfo_Kind, name, namespace string, info workloadInfo) {
+		kind := wlKind.String()
 		wlInfo := &rpc.WorkloadInfo{
 			Name:                 name,
-			Namespace:            workload.GetNamespace(),
-			WorkloadResourceType: workload.GetKind(),
-			Uid:                  string(workload.GetUID()),
+			Namespace:            namespace,
+			WorkloadResourceType: kind,
+			Uid:                  string(info.uid),
 		}
-
-		svcs, err := agentmap.FindServicesForPod(ctx, workload.GetPodTemplate(), "")
-		if err == nil && len(svcs) > 0 {
-			srm := make(map[string]*rpc.WorkloadInfo_ServiceReference, len(svcs))
-			for _, so := range svcs {
-				if svc, ok := k8sapi.ServiceImpl(so); ok {
-					srm[string(svc.UID)] = &rpc.WorkloadInfo_ServiceReference{
-						Name:      svc.Name,
-						Namespace: svc.Namespace,
-						Ports:     getServicePorts(svc),
-					}
-				}
-			}
-			wlInfo.Services = srm
+		if info.state != workload.StateAvailable {
+			wlInfo.NotInterceptableReason = info.state.String()
 		}
 
 		var ok bool
@@ -612,7 +601,7 @@ func (s *session) getInfosForWorkloads(
 		if wlInfo.Sidecar, ok = sMap[name]; !ok && filter <= rpc.ListRequest_INSTALLED_AGENTS {
 			return
 		}
-		wiMap[workload.GetUID()] = wlInfo
+		wiMap[fmt.Sprintf("%s:%s.%s", kind, name, namespace)] = wlInfo
 	})
 	wiz := make([]*rpc.WorkloadInfo, len(wiMap))
 	i := 0
@@ -624,56 +613,44 @@ func (s *session) getInfosForWorkloads(
 	return wiz
 }
 
-func getServicePorts(svc *core.Service) []*rpc.WorkloadInfo_ServiceReference_Port {
-	ports := make([]*rpc.WorkloadInfo_ServiceReference_Port, len(svc.Spec.Ports))
-	for i, p := range svc.Spec.Ports {
-		ports[i] = &rpc.WorkloadInfo_ServiceReference_Port{
-			Name: p.Name,
-			Port: p.Port,
-		}
-	}
-	return ports
-}
-
-func (s *session) waitForSync(ctx context.Context) {
-	s.wlWatcher.setNamespacesToWatch(ctx, s.GetCurrentNamespaces(true))
-	s.wlWatcher.waitForSync(ctx)
-}
-
 func (s *session) WatchWorkloads(c context.Context, wr *rpc.WatchWorkloadsRequest, stream userd.WatchWorkloadsStream) error {
-	s.waitForSync(c)
-	s.ensureWatchers(c, wr.Namespaces)
-	sCtx, sCancel := context.WithCancel(c)
-	// We need to make sure the subscription ends when we leave this method, since this is the one consuming the snapshotAvailable channel.
-	// Otherwise, the goroutine that writes to the channel will leak.
-	defer sCancel()
-	snapshotAvailable := s.wlWatcher.subscribe(sCtx)
+	id := uuid.New()
+	ch := make(chan struct{})
+	s.workloadsLock.Lock()
+	if s.workloadSubscribers == nil {
+		s.workloadSubscribers = make(map[uuid.UUID]chan struct{})
+	}
+	s.workloadSubscribers[id] = ch
+	s.workloadsLock.Unlock()
+
+	defer func() {
+		s.workloadsLock.Lock()
+		delete(s.workloadSubscribers, id)
+		s.workloadsLock.Unlock()
+	}()
+
+	send := func() error {
+		ws, err := s.WorkloadInfoSnapshot(c, wr.Namespaces, rpc.ListRequest_EVERYTHING)
+		if err != nil {
+			return err
+		}
+		return stream.Send(ws)
+	}
+
+	// Send initial snapshot
+	if err := send(); err != nil {
+		return err
+	}
 	for {
 		select {
-		case <-c.Done(): // if context is done (usually the session's context).
+		case <-c.Done():
 			return nil
-		case <-stream.Context().Done(): // if stream context is done.
-			return nil
-		case <-snapshotAvailable:
-			snapshot, err := s.workloadInfoSnapshot(c, wr.GetNamespaces(), rpc.ListRequest_INTERCEPTABLE)
-			if err != nil {
-				return status.Errorf(codes.Unavailable, "failed to create WorkloadInfoSnapshot: %v", err)
-			}
-			if err := stream.Send(snapshot); err != nil {
-				dlog.Errorf(c, "WatchWorkloads.Send() failed: %v", err)
+		case <-ch:
+			if err := send(); err != nil {
 				return err
 			}
 		}
 	}
-}
-
-func (s *session) WorkloadInfoSnapshot(
-	ctx context.Context,
-	namespaces []string,
-	filter rpc.ListRequest_Filter,
-) (*rpc.WorkloadInfoSnapshot, error) {
-	s.waitForSync(ctx)
-	return s.workloadInfoSnapshot(ctx, namespaces, filter)
 }
 
 func (s *session) ensureWatchers(ctx context.Context,
@@ -683,30 +660,31 @@ func (s *session) ensureWatchers(ctx context.Context,
 	wg := sync.WaitGroup{}
 	wg.Add(len(namespaces))
 	for _, ns := range namespaces {
-		if ns == "" {
-			ns = s.Namespace
+		s.workloadsLock.Lock()
+		_, ok := s.workloads[ns]
+		s.workloadsLock.Unlock()
+		if ok {
+			wg.Done()
+		} else {
+			go func() {
+				if err := s.workloadsWatcher(ctx, ns, &wg); err != nil {
+					dlog.Errorf(ctx, "error ensuring watcher for namespace %s: %v", ns, err)
+					return
+				}
+			}()
+			dlog.Debugf(ctx, "watcher for namespace %s started", ns)
 		}
-		wgp := &wg
-		s.wlWatcher.ensureStarted(ctx, ns, func(started bool) {
-			if started {
-				dlog.Debugf(ctx, "watchers for %s started", ns)
-			}
-			if wgp != nil {
-				wgp.Done()
-				wgp = nil
-			}
-		})
 	}
 	wg.Wait()
+	dlog.Debugf(ctx, "watchers for %q synced", namespaces)
 }
 
-func (s *session) workloadInfoSnapshot(
+func (s *session) WorkloadInfoSnapshot(
 	ctx context.Context,
 	namespaces []string,
 	filter rpc.ListRequest_Filter,
 ) (*rpc.WorkloadInfoSnapshot, error) {
 	is := s.getCurrentIntercepts()
-	s.ensureWatchers(ctx, namespaces)
 
 	var nss []string
 	if filter == rpc.ListRequest_INTERCEPTS {
@@ -723,8 +701,10 @@ func (s *session) workloadInfoSnapshot(
 	}
 	if len(nss) == 0 {
 		// none of the namespaces are currently mapped
+		dlog.Debug(ctx, "No namespaces are mapped")
 		return &rpc.WorkloadInfoSnapshot{}, nil
 	}
+	s.ensureWatchers(ctx, nss)
 
 	iMap := make(map[string][]*manager.InterceptInfo, len(is))
 nextIs:
@@ -748,7 +728,7 @@ nextIs:
 		}
 	}
 
-	workloadInfos := s.getInfosForWorkloads(ctx, nss, iMap, sMap, filter)
+	workloadInfos := s.getInfosForWorkloads(nss, iMap, sMap, filter)
 	return &rpc.WorkloadInfoSnapshot{Workloads: workloadInfos}, nil
 }
 
@@ -908,11 +888,9 @@ func (s *session) Uninstall(ctx context.Context, ur *rpc.UninstallRequest) (*com
 	// to prevent the clients from doing it.
 	if ur.UninstallType == rpc.UninstallRequest_NAMED_AGENTS {
 		// must have a valid namespace in order to uninstall named agents
-		s.waitForSync(ctx)
 		if ur.Namespace == "" {
 			ur.Namespace = s.Namespace
 		}
-		s.wlWatcher.ensureStarted(ctx, ur.Namespace, nil)
 		namespace := s.ActualNamespace(ur.Namespace)
 		if namespace == "" {
 			// namespace is not mapped
@@ -962,11 +940,9 @@ func (s *session) Uninstall(ctx context.Context, ur *rpc.UninstallRequest) (*com
 	}
 
 	if ur.Namespace != "" {
-		s.waitForSync(ctx)
 		if ur.Namespace == "" {
 			ur.Namespace = s.Namespace
 		}
-		s.wlWatcher.ensureStarted(ctx, ur.Namespace, nil)
 		namespace := s.ActualNamespace(ur.Namespace)
 		if namespace == "" {
 			// namespace is not mapped
@@ -1070,4 +1046,187 @@ func (s *session) connectRootDaemon(ctx context.Context, nc *rootdRpc.NetworkCon
 	}
 	dlog.Debug(ctx, "Connected to root daemon")
 	return rd, nil
+}
+
+func (s *session) eachWorkload(namespaces []string, do func(kind manager.WorkloadInfo_Kind, name, namespace string, info workloadInfo)) {
+	s.workloadsLock.Lock()
+	for _, ns := range namespaces {
+		if workloads, ok := s.workloads[ns]; ok {
+			for key, info := range workloads {
+				do(key.kind, key.name, ns, info)
+			}
+		}
+	}
+	s.workloadsLock.Unlock()
+}
+
+func rpcKind(s string) manager.WorkloadInfo_Kind {
+	switch strings.ToLower(s) {
+	case "deployment":
+		return manager.WorkloadInfo_DEPLOYMENT
+	case "replicaset":
+		return manager.WorkloadInfo_REPLICASET
+	case "statefulset":
+		return manager.WorkloadInfo_STATEFULSET
+	case "rollout":
+		return manager.WorkloadInfo_ROLLOUT
+	default:
+		return manager.WorkloadInfo_UNSPECIFIED
+	}
+}
+
+func (s *session) localWorkloadsWatcher(ctx context.Context, namespace string, synced *sync.WaitGroup) error {
+	defer func() {
+		if synced != nil {
+			synced.Done()
+		}
+		dlog.Debug(ctx, "client workload watcher ended")
+	}()
+
+	knownWorkloadKinds, err := s.managerClient.GetKnownWorkloadKinds(ctx, s.sessionInfo)
+	if err != nil {
+		if status.Code(err) != codes.Unimplemented {
+			return fmt.Errorf("failed to get known workload kinds: %w", err)
+		}
+		// Talking to an older traffic-manager, use legacy default types
+		knownWorkloadKinds = &manager.KnownWorkloadKinds{Kinds: []manager.WorkloadInfo_Kind{
+			manager.WorkloadInfo_DEPLOYMENT,
+			manager.WorkloadInfo_REPLICASET,
+			manager.WorkloadInfo_STATEFULSET,
+		}}
+	}
+
+	dlog.Debugf(ctx, "Watching workloads from client due to lack of workload watcher support in traffic-manager %s", s.managerVersion)
+	fc := informer.GetFactory(ctx, namespace)
+	if fc == nil {
+		ctx = informer.WithFactory(ctx, namespace)
+		fc = informer.GetFactory(ctx, namespace)
+	}
+	workload.StartDeployments(ctx, namespace)
+	workload.StartReplicaSets(ctx, namespace)
+	workload.StartStatefulSets(ctx, namespace)
+	kf := fc.GetK8sInformerFactory()
+	kf.Start(ctx.Done())
+
+	rolloutsEnabled := slices.Index(knownWorkloadKinds.Kinds, manager.WorkloadInfo_ROLLOUT) >= 0
+	if rolloutsEnabled {
+		workload.StartRollouts(ctx, namespace)
+		af := fc.GetArgoRolloutsInformerFactory()
+		af.Start(ctx.Done())
+	}
+
+	ww, err := workload.NewWatcher(ctx, namespace, rolloutsEnabled)
+	if err != nil {
+		workload.StartRollouts(ctx, namespace)
+		return err
+	}
+	kf.WaitForCacheSync(ctx.Done())
+
+	wlCh := ww.Subscribe(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case wls := <-wlCh:
+			if wls == nil {
+				return nil
+			}
+			s.workloadsLock.Lock()
+			workloads, ok := s.workloads[namespace]
+			if !ok {
+				workloads = make(map[workloadInfoKey]workloadInfo)
+				s.workloads[namespace] = workloads
+			}
+			for _, we := range wls {
+				w := we.Workload
+				key := workloadInfoKey{kind: rpcKind(w.GetKind()), name: w.GetName()}
+				if we.Type == workload.EventTypeDelete {
+					delete(workloads, key)
+				} else {
+					workloads[key] = workloadInfo{
+						state: workload.GetWorkloadState(w),
+						uid:   w.GetUID(),
+					}
+				}
+			}
+			for _, subscriber := range s.workloadSubscribers {
+				select {
+				case subscriber <- struct{}{}:
+				default:
+				}
+			}
+			s.workloadsLock.Unlock()
+			if synced != nil {
+				synced.Done()
+				synced = nil
+			}
+		}
+	}
+}
+
+func (s *session) workloadsWatcher(ctx context.Context, namespace string, synced *sync.WaitGroup) error {
+	defer func() {
+		if synced != nil {
+			synced.Done()
+		}
+	}()
+	wlc, err := s.managerClient.WatchWorkloads(ctx, &manager.WorkloadEventsRequest{SessionInfo: s.sessionInfo, Namespace: namespace})
+	if err != nil {
+		return err
+	}
+
+	for ctx.Err() == nil {
+		wls, err := wlc.Recv()
+		if err != nil {
+			if status.Code(err) != codes.Unimplemented {
+				return err
+			}
+			localSynced := synced
+			synced = nil
+			return s.localWorkloadsWatcher(ctx, namespace, localSynced)
+		}
+
+		s.workloadsLock.Lock()
+		workloads, ok := s.workloads[namespace]
+		if !ok {
+			workloads = make(map[workloadInfoKey]workloadInfo)
+			s.workloads[namespace] = workloads
+		}
+
+		for _, we := range wls.GetEvents() {
+			w := we.Workload
+			key := workloadInfoKey{kind: w.Kind, name: w.Name}
+			if we.Type == manager.WorkloadEvent_DELETED {
+				dlog.Debugf(ctx, "Deleting workload %s/%s.%s", key.kind, key.name, namespace)
+				delete(workloads, key)
+			} else {
+				var clients []string
+				if lc := len(w.InterceptClients); lc > 0 {
+					clients = make([]string, lc)
+					for i, ic := range w.InterceptClients {
+						clients[i] = ic.Client
+					}
+				}
+				dlog.Debugf(ctx, "Adding workload %s/%s.%s", key.kind, key.name, namespace)
+				workloads[key] = workloadInfo{
+					uid:              types.UID(w.Uid),
+					state:            workload.StateFromRPC(w.State),
+					agentState:       w.AgentState,
+					interceptClients: clients,
+				}
+			}
+		}
+		for _, subscriber := range s.workloadSubscribers {
+			select {
+			case subscriber <- struct{}{}:
+			default:
+			}
+		}
+		s.workloadsLock.Unlock()
+		if synced != nil {
+			synced.Done()
+			synced = nil
+		}
+	}
+	return nil
 }
