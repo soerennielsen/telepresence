@@ -973,11 +973,15 @@ func (s *service) WatchWorkloads(request *rpc.WorkloadEventsRequest, stream rpc.
 		return status.Error(codes.InvalidArgument, "SessionInfo is required")
 	}
 	clientSession := request.SessionInfo.SessionId
-	clientInfo := s.state.GetClient(clientSession)
-	if clientInfo == nil {
-		return status.Errorf(codes.NotFound, "Client session %q not found", clientSession)
+	namespace := request.Namespace
+	if namespace == "" {
+		clientInfo := s.state.GetClient(clientSession)
+		if clientInfo == nil {
+			return status.Errorf(codes.NotFound, "Client session %q not found", clientSession)
+		}
+		namespace = clientInfo.Namespace
 	}
-	ww := s.state.NewWorkloadInfoWatcher(clientSession, clientInfo.Namespace)
+	ww := s.state.NewWorkloadInfoWatcher(clientSession, namespace)
 	return ww.Watch(ctx, stream)
 }
 
