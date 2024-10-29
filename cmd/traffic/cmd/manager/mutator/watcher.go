@@ -164,6 +164,14 @@ func (c *configWatcher) isRolloutNeeded(ctx context.Context, wl k8sapi.Workload,
 		}
 		return true
 	}
+	if ac == nil {
+		if okPods < runningPods {
+			dlog.Debugf(ctx, "Rollout of %s.%s is necessary. At least one pod still has an agent",
+				wl.GetName(), wl.GetNamespace())
+			return true
+		}
+		return false
+	}
 	dlog.Debugf(ctx, "Rollout of %s.%s is not necessary. At least one pod have the desired agent state",
 		wl.GetName(), wl.GetNamespace())
 	return false
