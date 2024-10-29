@@ -197,7 +197,6 @@ func rpcWorkload(wl k8sapi.Workload, as rpc.WorkloadInfo_AgentState, iClients []
 }
 
 func (wf *workloadInfoWatcher) addEvent(
-	ctx context.Context,
 	eventType workload.EventType,
 	wl k8sapi.Workload,
 	as rpc.WorkloadInfo_AgentState,
@@ -207,7 +206,7 @@ func (wf *workloadInfoWatcher) addEvent(
 		Type:     rpc.WorkloadEvent_Type(eventType),
 		Workload: rpcWorkload(wl, as, iClients),
 	}
-	wf.sendEvents(ctx, false)
+	wf.resetTicker()
 }
 
 func (wf *workloadInfoWatcher) handleWorkloadsSnapshot(ctx context.Context, wes []workload.WorkloadEvent, initial bool) {
