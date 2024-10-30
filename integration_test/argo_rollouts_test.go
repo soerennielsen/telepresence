@@ -97,9 +97,10 @@ func (s *argoRolloutsSuite) Test_SuccessfullyInterceptsArgoRollout() {
 
 	stdout := itest.TelepresenceOk(ctx, "intercept", "--mount", "false", "--port", port, svc)
 	require.Contains(stdout, "Using "+tp+" "+svc)
-	stdout = itest.TelepresenceOk(ctx, "list", "--intercepts")
-	require.Contains(stdout, svc+": intercepted")
-	require.NotContains(stdout, "Volume Mount Point")
+	require.Eventually(func() bool {
+		stdout = itest.TelepresenceOk(ctx, "list", "--intercepts")
+		return strings.Contains(stdout, svc+": intercepted") && !strings.Contains(stdout, "Volume Mount Point")
+	}, 14*time.Second, 2*time.Second)
 	s.CapturePodLogs(ctx, svc, "traffic-agent", s.AppNamespace())
 	itest.TelepresenceOk(ctx, "leave", svc)
 	stdout = itest.TelepresenceOk(ctx, "list", "--intercepts")

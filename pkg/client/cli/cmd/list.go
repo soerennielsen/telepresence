@@ -175,6 +175,9 @@ func (s *listCommand) printList(ctx context.Context, workloads []*connector.Work
 			return intercept.DescribeIntercepts(ctx, iis, "", s.debug)
 		}
 		ai := workload.Sidecar
+		if workload.NotInterceptableReason == "Progressing" {
+			return "progressing..."
+		}
 		if ai != nil {
 			return "ready to intercept (traffic-agent already installed)"
 		}

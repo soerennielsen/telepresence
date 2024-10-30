@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/go-json-experiment/json"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -70,6 +71,9 @@ type Env struct {
 	ClientConnectionTTL                  time.Duration  `env:"CLIENT_CONNECTION_TTL,              		parser=time.ParseDuration"`
 
 	ArgoRolloutsEnabled bool `env:"ARGO_ROLLOUTS_ENABLED, parser=bool, default=false"`
+
+	// For testing only
+	CompatibilityVersion *semver.Version `env:"COMPATIBILITY_VERSION, parser=version, default="`
 }
 
 func (e *Env) GeneratorConfig(qualifiedAgentImage string) (agentmap.GeneratorConfig, error) {
@@ -116,7 +120,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return uint16(pn), err
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.SetUint(uint64(src.(uint16))) },
+		Setter: func(dst reflect.Value, src any) { dst.SetUint(uint64(src.(uint16))) },
 	}
 	fhs[reflect.TypeOf(k8sapi.AppProtocolStrategy(0))] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -124,7 +128,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return k8sapi.NewAppProtocolStrategy(str)
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.SetInt(int64(src.(k8sapi.AppProtocolStrategy))) },
+		Setter: func(dst reflect.Value, src any) { dst.SetInt(int64(src.(k8sapi.AppProtocolStrategy))) },
 	}
 	fhs[reflect.TypeOf(agentconfig.InjectPolicy(0))] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -132,7 +136,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return agentconfig.NewEnablePolicy(str)
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.SetInt(int64(src.(agentconfig.InjectPolicy))) },
+		Setter: func(dst reflect.Value, src any) { dst.SetInt(int64(src.(agentconfig.InjectPolicy))) },
 	}
 	fhs[reflect.TypeOf(resource.Quantity{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -140,7 +144,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return resource.ParseQuantity(str)
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.(resource.Quantity))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.(resource.Quantity))) },
 	}
 	fhs[reflect.TypeOf(netip.Addr{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -148,7 +152,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return netip.ParseAddr(str)
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.(netip.Addr))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.(netip.Addr))) },
 	}
 	fhs[reflect.TypeOf([]string{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -163,7 +167,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return ss, nil
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.([]string))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.([]string))) },
 	}
 	fhs[reflect.TypeOf([]netip.Prefix{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -182,7 +186,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return ns, nil
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.([]netip.Prefix))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.([]netip.Prefix))) },
 	}
 	fhs[reflect.TypeOf([]core.LocalObjectReference{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -197,7 +201,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return rr, nil
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.([]core.LocalObjectReference))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.([]core.LocalObjectReference))) },
 	}
 	fhs[reflect.TypeOf(&core.ResourceRequirements{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -212,7 +216,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return rr, nil
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.(*core.ResourceRequirements))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.(*core.ResourceRequirements))) },
 	}
 	fhs[reflect.TypeOf(&core.SecurityContext{})] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -227,7 +231,7 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return rr, nil
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.Set(reflect.ValueOf(src.(*core.SecurityContext))) },
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.(*core.SecurityContext))) },
 	}
 	fhs[reflect.TypeOf(true)] = envconfig.FieldTypeHandler{
 		Parsers: map[string]func(string) (any, error){
@@ -235,7 +239,22 @@ func fieldTypeHandlers() map[reflect.Type]envconfig.FieldTypeHandler {
 				return strconv.ParseBool(str)
 			},
 		},
-		Setter: func(dst reflect.Value, src interface{}) { dst.SetBool(src.(bool)) },
+		Setter: func(dst reflect.Value, src any) { dst.SetBool(src.(bool)) },
+	}
+	fhs[reflect.TypeOf(&semver.Version{})] = envconfig.FieldTypeHandler{
+		Parsers: map[string]func(string) (any, error){
+			"version": func(str string) (any, error) {
+				if str == "" {
+					return nil, nil
+				}
+				v, err := semver.Parse(str)
+				if err != nil {
+					return nil, err
+				}
+				return &v, nil
+			},
+		},
+		Setter: func(dst reflect.Value, src any) { dst.Set(reflect.ValueOf(src.(*semver.Version))) },
 	}
 	return fhs
 }

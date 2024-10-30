@@ -631,6 +631,7 @@ message WorkloadInfo {
   Kind kind = 1;
   string name = 2;
   string namespace = 3;
+  string uid = 7;
   AgentState agent_state = 4;
 
   repeated Intercept intercept_clients = 5;
@@ -667,6 +668,10 @@ message WorkloadEventsRequest {
   // The timestamp from which the first delta should be computed. Set to
   // undefined to get a delta that contains everything.
   google.protobuf.Timestamp since = 2;
+
+  // The namespace to watch. Must be one of the namespaces that are
+  // managed by the traffic-manager. Defaults to the connected namespace.
+  string namespace = 3;
 }
 
 service Manager {
