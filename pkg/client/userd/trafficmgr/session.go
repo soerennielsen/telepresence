@@ -656,6 +656,9 @@ func (s *session) WatchWorkloads(c context.Context, wr *rpc.WatchWorkloadsReques
 func (s *session) ensureWatchers(ctx context.Context,
 	namespaces []string,
 ) {
+	v := s.managerVersion
+	managerHasWatcherSupport := v.Major > 2 || v.Major == 2 && v.Minor > 20
+
 	dlog.Debugf(ctx, "Ensure watchers %v", namespaces)
 	wg := sync.WaitGroup{}
 	wg.Add(len(namespaces))
@@ -667,7 +670,13 @@ func (s *session) ensureWatchers(ctx context.Context,
 			wg.Done()
 		} else {
 			go func() {
-				if err := s.workloadsWatcher(ctx, ns, &wg); err != nil {
+				var err error
+				if managerHasWatcherSupport {
+					err = s.workloadsWatcher(ctx, ns, &wg)
+				} else {
+					err = s.localWorkloadsWatcher(ctx, ns, &wg)
+				}
+				if err != nil {
 					dlog.Errorf(ctx, "error ensuring watcher for namespace %s: %v", ns, err)
 					return
 				}
@@ -1178,12 +1187,7 @@ func (s *session) workloadsWatcher(ctx context.Context, namespace string, synced
 	for ctx.Err() == nil {
 		wls, err := wlc.Recv()
 		if err != nil {
-			if status.Code(err) != codes.Unimplemented {
-				return err
-			}
-			localSynced := synced
-			synced = nil
-			return s.localWorkloadsWatcher(ctx, namespace, localSynced)
+			return err
 		}
 
 		s.workloadsLock.Lock()
