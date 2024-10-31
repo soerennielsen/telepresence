@@ -17,6 +17,7 @@ import (
 
 	"github.com/datawire/dlib/dlog"
 	"github.com/datawire/k8sapi/pkg/k8sapi"
+	"github.com/telepresenceio/telepresence/v2/pkg/agentmap"
 	"github.com/telepresenceio/telepresence/v2/pkg/informer"
 )
 
@@ -107,6 +108,11 @@ func hasValidReplicasetOwner(wl k8sapi.Workload, rolloutsEnabled bool) bool {
 	return false
 }
 
+var trafficManagerSelector = labels.SelectorFromSet(map[string]string{ //nolint:gochecknoglobals // constant
+	"app":          agentmap.ManagerAppName,
+	"telepresence": "manager",
+})
+
 func (w *watcher) Subscribe(ctx context.Context) <-chan []WorkloadEvent {
 	ch := make(chan []WorkloadEvent, 1)
 	initialEvents := make([]WorkloadEvent, 0, 100)
@@ -116,7 +122,7 @@ func (w *watcher) Subscribe(ctx context.Context) <-chan []WorkloadEvent {
 	dlog.Debugf(ctx, "workload.Watcher producing initial events for namespace %s", w.namespace)
 	if dps, err := ai.Deployments().Lister().Deployments(w.namespace).List(labels.Everything()); err == nil {
 		for _, obj := range dps {
-			if wl, ok := FromAny(obj); ok && !hasValidReplicasetOwner(wl, w.rolloutsEnabled) {
+			if wl, ok := FromAny(obj); ok && !hasValidReplicasetOwner(wl, w.rolloutsEnabled) && !trafficManagerSelector.Matches(labels.Set(obj.Labels)) {
 				initialEvents = append(initialEvents, WorkloadEvent{
 					Type:     EventTypeAdd,
 					Workload: wl,
@@ -263,6 +269,10 @@ func (w *watcher) addEventHandler(ctx context.Context, ns string) error {
 }
 
 func (w *watcher) handleEvent(we WorkloadEvent) {
+	// Always exclude the traffic-manager
+	if we.Workload.GetKind() == "Deployment" && trafficManagerSelector.Matches(labels.Set(we.Workload.GetLabels())) {
+		return
+	}
 	w.Lock()
 	w.events = append(w.events, we)
 	w.Unlock()
