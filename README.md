@@ -2,7 +2,7 @@
 
 [<img src="https://raw.githubusercontent.com/telepresenceio/telepresence.io/master/src/assets/images/telepresence-edgy.svg" width="80"/>](https://raw.githubusercontent.com/telepresenceio/telepresence.io/master/src/assets/images/telepresence-edgy.svg)
 
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/telepresence-oss)](https://artifacthub.io/packages/search?repo=telepresence-oss)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/telepresence-oss)](https://artifacthub.io/packages/search?repo=telepresence-oss) [![Gurubase](https://img.shields.io/badge/Gurubase-Ask%20Telepresence%20Guru-006BFF)](https://gurubase.io/g/telepresence)
 
 Telepresence gives developers infinite scale development environments for Kubernetes.
 
