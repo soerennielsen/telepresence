@@ -81,9 +81,26 @@ spec:
             value: {{ .grpc.maxReceiveSize }}
           {{- end }}
           {{- end }}
-          {{- if .workloads.argoRollouts }}
-          - name: ARGO_ROLLOUTS_ENABLED
-            value: {{ .workloads.argoRollouts.enabled | quote }}
+          {{- if .workloads }}
+          {{- with .workloads }}
+          - name: ENABLED_WORKLOAD_KINDS
+            value: >-
+              {{- if or (not .deployments) .deployments.enabled }}
+              Deployment
+              {{- end }}
+              {{- if or (not .statefulSets) .statefulSets.enabled }}
+              StatefulSet
+              {{- end }}
+              {{- if or (not .replicaSets) .replicaSets.enabled }}
+              ReplicaSet
+              {{- end }}
+              {{- if and .argoRollouts .argoRollouts.enabled }}
+              Rollout
+              {{- end }}
+          {{- end }}
+          {{- else }}
+          - name: ENABLED_WORKLOAD_KINDS
+            value: Deployment StatefulSet ReplicaSet
           {{- end }}
       {{- if .agentInjector.enabled }}
         {{- /*
