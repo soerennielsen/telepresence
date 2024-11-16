@@ -51,7 +51,7 @@ else
   PROTOLINT_ARCH=$(GOHOSTARCH)
 endif
 ifeq ($(GOHOSTOS),windows)
-  PROTOC_OS_ARCH=win64
+  PROTOC_OS_ARCH=win64		# Note: This is the only version released by the protobuf project, however does it work on arm64 windows?
   EXE=.exe
 else
   PROTOC_OS_ARCH=$(patsubst darwin,osx,$(GOHOSTOS))-$(PROTOC_ARCH)

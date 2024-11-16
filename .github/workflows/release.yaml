@@ -23,9 +23,6 @@ jobs:
         arch:
           - amd64
           - arm64
-        exclude:
-          - runner: windows-latest
-            arch: arm64
     runs-on: ${{ matrix.runner }}
     env:
       GOARCH: ${{ matrix.arch }}
@@ -144,6 +141,7 @@ jobs:
                - 📦 [telepresence-darwin-arm64](https://app.getambassador.io/download/tel2oss/releases/download/${{ github.ref_name }}/telepresence-darwin-arm64)
             ### Windows
                - 📦 [telepresence-windows-amd64.zip](https://app.getambassador.io/download/tel2oss/releases/download/${{ github.ref_name }}/telepresence-windows-amd64.zip)
+               - 📦 [telepresence-windows-amd64.zip](https://app.getambassador.io/download/tel2oss/releases/download/${{ github.ref_name }}/telepresence-windows-arm64.zip)
 
             For more builds across platforms and architectures, see the `Assets` section below.
             And for more information, visit our [installation docs](https://www.telepresence.io/docs/quick-start/).
@@ -172,9 +170,6 @@ jobs:
         arch:
           - amd64
           - arm64
-        exclude:
-          - runner: windows-latest
-            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: download binary
